@@ -1,7 +1,8 @@
 export const CATEGORIES = ['工作', '生活', '学习', '其他'] as const;
 export type Category = typeof CATEGORIES[number];
-export const THEMES = ['purple', 'green', 'orange'] as const;
+export const THEMES = ['orange', 'green', 'purple', 'pink'] as const;
 export type Theme = typeof THEMES[number];
+export const THEME_LABELS: Record<Theme, string> = { orange: '伊藤橙', green: '酷安绿', purple: '韵味紫', pink: '哔哩粉' };
 export type ReminderMode = 'default' | 'custom' | 'none';
 export interface Task {
   sourceType?: 'text' | 'file';

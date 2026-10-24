@@ -170,6 +170,15 @@ button:disabled { cursor: default; opacity: .5; }
   --theme-header-end: #fffaf5;
   --theme-shadow: #e2853d2a;
 }
+.app-shell.theme-pink {
+  --theme-primary: #e5688e;
+  --theme-primary-hover: #c84c74;
+  --theme-primary-soft: #fff3f7;
+  --theme-primary-tint: #ffe6ef;
+  --theme-primary-border: #f1bfd0;
+  --theme-header-end: #fff9fb;
+  --theme-shadow: #e5688e2a;
+}
 .app-shell .titlebar { background: linear-gradient(125deg, var(--theme-primary-tint) 0%, var(--theme-header-end) 56%, var(--theme-primary-soft) 100%); border-bottom-color: var(--theme-primary-border); }
 .app-shell .brand-mark { background: var(--theme-primary); box-shadow: 0 6px 12px var(--theme-shadow); }
 .app-shell .icon-button:hover { color: var(--theme-primary); background: var(--theme-primary-tint); }
@@ -193,7 +202,7 @@ button:disabled { cursor: default; opacity: .5; }
 .app-shell .settings-note { color: var(--theme-primary-hover); background: var(--theme-primary-soft); }
 .theme-picker { margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--line); }
 .theme-picker-label { display: block; margin-bottom: 8px; color: #66808a; font-size: 10px; font-weight: 700; }
-.theme-options { display: flex; gap: 8px; flex-wrap: wrap; }
+.theme-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .theme-option { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid #e1e9e7; border-radius: 9px; color: #6f8188; background: #fff; font-size: 10px; }
 .theme-option:hover { border-color: #cbd9d5; }
 .theme-option.selected { border-color: var(--theme-primary); color: var(--theme-primary-hover); background: var(--theme-primary-soft); box-shadow: 0 0 0 2px var(--theme-shadow); }
@@ -201,6 +210,7 @@ button:disabled { cursor: default; opacity: .5; }
 .theme-option-purple .theme-swatch { background: #7b61c9; }
 .theme-option-green .theme-swatch { background: #46a876; }
 .theme-option-orange .theme-swatch { background: #e2853d; }
+.theme-option-pink .theme-swatch { background: #e5688e; }
 @media (max-width: 400px) {
   .brand h1 span { display: none; }
   .titlebar { padding-right: 12px; padding-left: 12px; }

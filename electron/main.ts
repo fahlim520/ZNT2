@@ -1,11 +1,11 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, Notification, powerMonitor, screen, shell, Tray, Menu, safeStorage, utilityProcess, type IpcMainInvokeEvent, type IpcMainEvent } from 'electron';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import * as nodeFs from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DockWindow } from './dock';
 import { LocalStore } from './store';
+import { initializeReminderAudioFolder, readNextReminderSound } from './reminder-audio';
 import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, parseDocuments, testConnection } from './ai';
 import { IMPORT_EXTENSIONS, IMPORT_LIMITS, type ImportedDocument } from './import-domain';
 import { normalizeInput, saveTaskRecord, toggleTaskRecord, isReminderDue, reminderSchedule, parseReminderResponse, THEMES, type ReminderSound, type Result, type Settings, type SettingsInput, type Task, type TaskInput, type Theme } from './domain';
@@ -76,46 +76,22 @@ function refreshTray() {
   ]));
 }
 
-const REMINDER_AUDIO_EXTENSIONS = new Set(['.aac', '.flac', '.m4a', '.mp3', '.ogg', '.wav', '.webm']);
-const REMINDER_AUDIO_MIME: Record<string, string> = {
-  '.aac': 'audio/aac', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.mp3': 'audio/mpeg',
-  '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.webm': 'audio/webm',
-};
 function reminderAudioDirectory() {
   return path.join(app.getPath('documents'), '轻任务', '提醒音频');
 }
-function reminderAudioFiles(): string[] {
-  const preferred = reminderAudioDirectory();
-  nodeFs.mkdirSync(preferred, { recursive: true });
-  const legacy = path.join(app.getPath('documents'), 'QQ滑出任务管家', '提醒音频');
-  const fallback = path.join(app.getPath('userData'), 'reminder-audio');
-  const directories = [preferred, legacy, fallback];
-  for (const directory of directories) {
-    try {
-      const files = nodeFs.readdirSync(directory, { withFileTypes: true })
-        .filter(entry => entry.isFile() && REMINDER_AUDIO_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
-        .map(entry => path.join(directory, entry.name))
-        .sort((a, b) => path.basename(a).localeCompare(path.basename(b), 'zh-CN'));
-      if (files.length) return files;
-    } catch { /* The audio folder is optional. */ }
-  }
-  return [];
+function reminderAudioSources() {
+  return [
+    path.join(app.getPath('documents'), 'QQ滑出任务管家', '提醒音频'),
+    path.join(app.getPath('userData'), 'reminder-audio'),
+    path.join(app.getAppPath(), 'assets', 'reminder-audio'),
+  ];
 }
 function nextReminderSound(): ReminderSound | undefined {
-  const files = reminderAudioFiles();
-  if (!files.length) return undefined;
   const saved = store.settings();
-  const rawIndex = Number.isInteger(saved.reminderSoundIndex) && (saved.reminderSoundIndex as number) >= 0 ? saved.reminderSoundIndex as number : 0;
-  const index = rawIndex % files.length;
-  const filename = files[index];
-  try {
-    const extension = path.extname(filename).toLowerCase();
-    const data = nodeFs.readFileSync(filename).toString('base64');
-    store.saveSettings({ ...saved, reminderSoundIndex: (index + 1) % files.length });
-    return { dataUrl: `data:${REMINDER_AUDIO_MIME[extension] || 'application/octet-stream'};base64,${data}`, name: path.basename(filename), index, total: files.length };
-  } catch {
-    return undefined;
-  }
+  const next = readNextReminderSound([reminderAudioDirectory(), ...reminderAudioSources()], saved.reminderSoundIndex);
+  if (!next) return undefined;
+  store.saveSettings({ ...saved, reminderSoundIndex: next.nextIndex });
+  return next.sound;
 }
 
 function repairLegacyDateOnlyTasks(): Task[] {
@@ -344,7 +320,7 @@ function registerIpc() {
   handle('settings:get', settings);
   handle('audio:open-folder', async () => {
     const directory = reminderAudioDirectory();
-    nodeFs.mkdirSync(directory, { recursive: true });
+    initializeReminderAudioFolder(directory, reminderAudioSources());
     const error = await shell.openPath(directory);
     if (error) throw new Error(error);
     return true;
@@ -413,7 +389,8 @@ function registerIpc() {
 
 function boot() {
   store = new LocalStore(app.getPath('userData'));
-  nodeFs.mkdirSync(reminderAudioDirectory(), { recursive: true });
+  try { initializeReminderAudioFolder(reminderAudioDirectory(), reminderAudioSources()); }
+  catch { /* Folder access must not prevent startup or the bundled audio fallback. */ }
   const savedSettings = store.settings();
   const g = dockGeometryPrimary();
   const iconPath = path.join(app.getAppPath(), 'assets', 'icon.png');

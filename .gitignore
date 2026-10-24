@@ -46,6 +46,11 @@ reminder-audio/
 *.ogg
 *.wav
 *.webm
+# Only these three bundled defaults are intentionally distributed.
+!assets/reminder-audio/
+!assets/reminder-audio/冰.wav
+!assets/reminder-audio/牛.wav
+!assets/reminder-audio/哇哦.wav
 
 # Editor / OS files
 .idea/
