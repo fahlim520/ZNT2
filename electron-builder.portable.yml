@@ -1,0 +1,13 @@
+appId: com.local.qqslidetask
+productName: QQ 滑出任务管家
+directories:
+  output: release-portable
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+win:
+  target:
+    - portable
+  signAndEditExecutable: false
+artifactName: ${productName}-${version}-${arch}.${ext}

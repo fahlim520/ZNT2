@@ -1,0 +1,44 @@
+# Dependencies and generated bundles
+node_modules/
+dist/
+dist-electron/
+release*/
+outputs/
+work/
+.vite/
+coverage/
+*.tsbuildinfo
+*.exe
+*.msi
+*.blockmap
+*.asar
+*.zip
+
+# Credentials and local user data (including encrypted credentials)
+.env
+.env.*
+!.env.example
+*key*.txt
+*secret*.txt
+*.pem
+*.key
+*.p12
+*.pfx
+.npmrc
+settings.json
+settings.json.*
+tasks.json
+tasks.json.*
+userData/
+user-data/
+qq-slide-task-manager/
+*.bak
+*.tmp
+*.log
+
+# Editor / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
