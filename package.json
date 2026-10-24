@@ -1,6 +1,6 @@
 {
-  "name": "qq-slide-task-manager",
-  "version": "0.1.0",
+  "name": "qing-task",
+  "version": "0.3.0",
   "description": "A classic QQ-style top edge task manager for Windows.",
   "main": "dist-electron/main.js",
   "author": "Local",
@@ -14,10 +14,15 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.80",
     "@vitejs/plugin-react": "^4.3.4",
+    "mammoth": "^1.13.0",
+    "pdfjs-dist": "^4.10.38",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "word-extractor": "^1.0.4",
+    "yauzl": "^2.10.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -32,26 +37,49 @@
   },
   "build": {
     "appId": "com.local.qqslidetask",
-    "productName": "QQ 滑出任务管家",
+    "productName": "轻任务",
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "assets/**/*",
       "package.json"
     ],
+    "icon": "assets/icon.ico",
     "directories": {
       "output": "release"
     },
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "artifactName": "${productName}-${version}-${arch}.${ext}",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": true
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false,
+      "include": "build/installer.nsh",
       "runAfterFinish": true
-    }
+    },
+    "extraResources": [
+      {
+        "from": "assets/icon.ico",
+        "to": "app-icon.ico"
+      },
+      {
+        "from": "electron/resources",
+        "to": "import-resources",
+        "filter": [
+          "*.ps1"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/pdfjs-dist/**/*",
+      "node_modules/@napi-rs/**/*"
+    ]
   }
 }

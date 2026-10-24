@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { CATEGORIES, chinaDay, fromChinaInput, toChinaInput, type Result, type Settings, type Task, type TaskInput, type ReminderMode, type ResizeEdge } from '../electron/domain';
+import { CATEGORIES, chinaDay, fromChinaInput, toChinaInput, type ReminderSound, type Result, type Settings, type Task, type TaskInput, type ReminderMode, type ResizeEdge, type Theme } from '../electron/domain';
+import ImportDialog from './ImportDialog';
+import type { ImportedDocument } from '../electron/import-domain';
 
 type Filter = 'pending' | 'today' | 'upcoming' | 'overdue' | 'done';
-type Draft = { id?: string; title: string; dueAt: string; reminderAt: string; reminderTimes?: string[]; reminderMode: ReminderMode; category: Task['category']; notes: string; sourceText: string };
+type Draft = { id?: string; sourceType?: 'text' | 'file'; title: string; dueAt: string; reminderAt: string; reminderTimes?: string[]; reminderMode: ReminderMode; category: Task['category']; notes: string; sourceText: string };
 const emptyDraft = (): Draft => ({ title: '', dueAt: '', reminderAt: '', reminderMode: 'default', category: '其他', notes: '', sourceText: '' });
 async function value<T>(promise: Promise<Result<T>>): Promise<T> { const result = await promise; if (!result.ok) throw new Error(result.error); return result.value; }
 function errorText(error: unknown) { return error instanceof Error ? error.message : '操作失败，请重试'; }
 function overdue(task: Task, now: number) { return !task.completed && !!task.dueAt && Date.parse(task.dueAt) < now; }
 function timeLabel(date?: string) { return date ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(date)) : '未设时间'; }
-function draftFrom(input: TaskInput): Draft { return { id: input.id, title: input.title, dueAt: toChinaInput(input.dueAt || undefined), reminderAt: toChinaInput(input.reminderAt || undefined), reminderTimes: input.reminderTimes || undefined, reminderMode: input.reminderMode || 'default', category: input.category || '其他', notes: input.notes || '', sourceText: input.sourceText || '' }; }
+function draftFrom(input: TaskInput): Draft { return { id: input.id, sourceType: input.sourceType, title: input.title, dueAt: toChinaInput(input.dueAt || undefined), reminderAt: toChinaInput(input.reminderAt || undefined), reminderTimes: input.reminderTimes || undefined, reminderMode: input.reminderMode || 'default', category: input.category || '其他', notes: input.notes || '', sourceText: input.sourceText || '' }; }
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, ReactNode> = {
     settings: <><path d="m9 3 1-1h4l1 3 3 1 2 3-2 3-1 3-3 2h-4l-1-3-3-1-2-3 2-3Z"/><circle cx="12" cy="10" r="3"/></>,
@@ -43,6 +45,8 @@ export default function App() {
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('deepseek-flash');
   const [startAtLogin, setStartAtLogin] = useState(false);
+  const [reminderSoundEnabled, setReminderSoundEnabled] = useState(true);
+  const [theme, setTheme] = useState<Theme>('green');
   const [settingsStatus, setSettingsStatus] = useState('');
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -57,15 +61,25 @@ export default function App() {
   const [reminderError, setReminderError] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [importSource, setImportSource] = useState<Promise<Result<ImportedDocument[]>> | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const importLocked = useRef(false);
   const dragStart = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const dragMoved = useRef(false);
   const resizePointer = useRef<number | null>(null);
+  const reminderAudio = useRef<HTMLAudioElement | null>(null);
 
   const api = window.taskDesk;
+  function startImport(source: () => Promise<Result<ImportedDocument[]>>) {
+    if (importLocked.current || busy || settingsOpen || draft || reminderPrompt) return;
+    importLocked.current = true; setDragOver(false); setStatus('');
+    setImportSource(source());
+  }
+  function closeImport() { importLocked.current = false; setImportSource(null); }
   async function load() {
     try {
       const [allTasks, current] = await Promise.all([value(api.getTasks()), value(api.getSettings())]);
-      setTasks(allTasks); setSettings(current); setModel(current.model); setStartAtLogin(current.startAtLogin); setLoadFailed(false);
+      setTasks(allTasks); setSettings(current); setModel(current.model); setStartAtLogin(current.startAtLogin); setReminderSoundEnabled(current.reminderSoundEnabled); setTheme(current.theme); setLoadFailed(false);
       if (current.firstRun) setSettingsOpen(true);
     } catch (error) { setStatus(errorText(error)); setLoadFailed(true); }
     finally { setLoaded(true); }
@@ -73,12 +87,19 @@ export default function App() {
   useEffect(() => {
     if (!api) return;
     void load();
-    const offReminder = api.onReminder(task => {
+    const offReminder = api.onReminder((task, sound?: ReminderSound) => {
       setTasks(current => current.some(item => item.id === task.id) ? current.map(item => item.id === task.id ? task : item) : [task, ...current]);
       setReminderPrompt(task);
       setReminderReply('');
       setReminderError('');
-      setStatus(`任务提醒 · ${task.title}${task.notes?.startsWith('Windows') ? ` · ${task.notes}` : ''}`);
+      if (sound?.dataUrl) {
+        reminderAudio.current?.pause();
+        const audio = new Audio(sound.dataUrl);
+        audio.volume = 1;
+        reminderAudio.current = audio;
+        void audio.play().catch(() => setStatus(`任务提醒 · ${task.title}（提示音播放失败，请检查系统音量）`));
+      }
+      setStatus(`任务提醒 · ${task.title}${sound ? ` · 播放 ${sound.name}` : ''}${task.notes?.startsWith('Windows') ? ` · ${task.notes}` : ''}`);
     });
     const offSettings = api.onSettings(() => { setApiKey(''); setSettingsStatus(''); setSettingsOpen(true); });
     const offPaused = api.onPaused(paused => setSettings(current => current ? { ...current, paused } : current));
@@ -87,9 +108,23 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (!api) return;
-    api.setKeepOpen(settingsOpen || !!draft || !!deleteId || !!reminderPrompt || composerFocused || !!input.trim() || busy || reminderBusy);
+    api.setKeepOpen(settingsOpen || !!draft || !!deleteId || !!reminderPrompt || composerFocused || !!input.trim() || busy || reminderBusy || !!importSource || dragOver);
     return () => api.setKeepOpen(false);
-  }, [settingsOpen, draft, deleteId, reminderPrompt, composerFocused, input, busy, reminderBusy]);
+  }, [settingsOpen, draft, deleteId, reminderPrompt, composerFocused, input, busy, reminderBusy, importSource, dragOver]);
+  useEffect(() => {
+    if (!api) return;
+    let depth = 0;
+    const isFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types || []).includes('Files');
+    const enter = (event: DragEvent) => { if (isFiles(event)) { event.preventDefault(); depth++; if (!importLocked.current) setDragOver(true); } };
+    const over = (event: DragEvent) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'; };
+    const leave = (event: DragEvent) => { if (isFiles(event)) { depth = Math.max(0, depth - 1); if (!depth) setDragOver(false); } };
+    const drop = (event: DragEvent) => { event.preventDefault(); depth = 0; setDragOver(false); const files = Array.from(event.dataTransfer?.files || []); if (files.length) startImport(() => api.importDroppedFiles(files)); };
+    const paste = (event: ClipboardEvent) => {
+      if (Array.from(event.clipboardData?.items || []).some(item => item.type.startsWith('image/'))) { event.preventDefault(); startImport(() => api.importClipboardImage()); }
+    };
+    window.addEventListener('dragenter', enter); window.addEventListener('dragover', over); window.addEventListener('dragleave', leave); window.addEventListener('drop', drop); window.addEventListener('paste', paste);
+    return () => { window.removeEventListener('dragenter', enter); window.removeEventListener('dragover', over); window.removeEventListener('dragleave', leave); window.removeEventListener('drop', drop); window.removeEventListener('paste', paste); };
+  }, [busy, settingsOpen, draft, reminderPrompt]);
 
   function handleDragStart(event: ReactPointerEvent<HTMLElement>) {
     if (event.button !== 0) return;
@@ -146,7 +181,7 @@ export default function App() {
 
   async function addWithAI() {
     const source = input.trim();
-    if (!source || busy || draft || settingsOpen) return;
+    if (!source || busy || draft || settingsOpen || importLocked.current) return;
     setBusy(true); setStatus('');
     try {
       const parsed = await value(api.parseTask(source));
@@ -197,7 +232,7 @@ export default function App() {
     event?.preventDefault(); if (settingsBusy) return;
     setSettingsBusy(true); setSettingsStatus('');
     try {
-      const saved = await value(api.saveSettings({ apiKey: apiKey.trim() || undefined, model: model.trim(), startAtLogin }));
+      const saved = await value(api.saveSettings({ apiKey: apiKey.trim() || undefined, model: model.trim(), startAtLogin, reminderSoundEnabled, theme }));
       setSettings(saved); setApiKey(''); setSettingsOpen(false); setStatus(saved.hasApiKey ? '设置已保存，可以开始添加任务了' : '设置已保存，随时可以手动添加任务');
     } catch (error) { setSettingsStatus(errorText(error)); }
     finally { setSettingsBusy(false); }
@@ -217,7 +252,7 @@ export default function App() {
   function openDraft(task?: Task) { setDraft(task ? draftFrom(task) : { ...emptyDraft(), title: input.trim().slice(0, 500), sourceText: input.trim() }); setDraftError(''); }
   if (!api) return <div className="browser-fallback"><strong>请从桌面应用打开轻任务</strong><p>开发时运行 npm run dev，或安装 Windows 安装包。</p></div>;
 
-  return <div className="app-shell">
+  return <div className={`app-shell theme-${theme}`}>
     <section className="panel">
       <header className="titlebar" onPointerDown={handleDragStart} onPointerMove={handleDragMove} onPointerUp={handleDragEnd} onPointerCancel={handleDragEnd}><div className="brand"><div className="brand-mark"><Icon name="check" size={24}/></div><div><h1>轻任务<span>DESKTOP PLANNER</span></h1><p>把事情放下来，让每一天更轻一点。</p></div></div><div className="title-actions"><button className="icon-button" aria-label="设置" onClick={() => { setSettingsStatus(''); setSettingsOpen(true); }}><Icon name="settings"/></button><button className="icon-button" aria-label="收起窗口" onClick={() => api.hideWindow()}><Icon name="up"/></button></div></header>
       <div className="overview"><div><span className="eyebrow">YOUR DAY, AT A GLANCE</span><div className="date-line">{new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'long', day: 'numeric', weekday: 'long' }).format(new Date(now))}</div></div><div className="today-count"><strong>{counts.today.toString().padStart(2,'0')}</strong><span>今日待办</span></div></div>
@@ -226,19 +261,27 @@ export default function App() {
       <main className="task-list" aria-label="任务列表">
         {!loaded ? <div className="empty"><div className="empty-icon"><Icon name="clock" size={28}/></div><h2>正在打开你的计划…</h2></div> : visible.length === 0 ? <div className="empty"><div className="empty-illustration"><span className="mini-line"/><span className="mini-line short"/><span className="mini-check"><Icon name="check" size={21}/></span></div><h2>{loadFailed ? '任务暂时无法读取' : search || category !== '全部' ? '没有找到相关任务' : filter === 'done' ? '每一步完成，都值得记录' : filter === 'overdue' ? '没有逾期的事情' : '留一点空间，给接下来的计划'}</h2><p>{loadFailed ? status : '一句话记下来，剩下的交给轻任务。'}</p>{loadFailed ? <button className="text-button" onClick={() => void load()}>重新读取</button> : <button className="text-button" onClick={() => openDraft()}>创建第一条任务 <Icon name="arrow" size={14}/></button>}</div> : visible.map(task => <article key={task.id} className={`task-card ${task.completed ? 'completed' : ''} ${overdue(task,now) ? 'overdue' : ''}`}><button className="check" aria-label={`${task.completed ? '恢复' : '完成'}：${task.title}`} onClick={() => void toggle(task)}>{task.completed && <Icon name="check" size={13}/>}</button><div className="task-body"><div className="task-title">{task.title}</div><div className="task-meta"><span className={`tag category-${task.category}`}>{task.category}</span><span className="task-time"><Icon name="clock" size={12}/>{timeLabel(task.dueAt)}{overdue(task,now) && ' · 已逾期'}</span></div>{task.reminderAt && <div className="reminder-line"><Icon name="bell" size={11}/> {timeLabel(task.reminderAt)} 提醒</div>}{task.notes && <p className="task-notes">{task.notes}</p>}</div><div className="task-actions"><button className="icon-button" aria-label={`编辑：${task.title}`} onClick={() => openDraft(task)}><Icon name="edit" size={14}/></button><button className="icon-button" aria-label={`删除：${task.title}`} onClick={() => setDeleteId(task.id)}><Icon name="trash" size={14}/></button></div></article>)}
       </main>
-      <footer className="composer-area"><div className="composer-label"><span><Icon name="spark" size={14}/> 一句话，安排好</span><button className="text-button" onClick={() => openDraft()} disabled={busy}><Icon name="plus" size={12}/> 手动添加</button></div><div className={`composer ${busy ? 'busy' : ''}`}><textarea aria-label="自然语言任务" aria-keyshortcuts="Enter Shift+Enter" placeholder="比如：明天下午 3 点开会，提前 10 分钟提醒" value={input} maxLength={4000} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); if (!event.repeat) void addWithAI(); } }} rows={2}/><div className="composer-bottom"><span>{busy ? '正在理解你的安排…' : 'Enter 发送 · Shift+Enter 换行'}</span><button className="add-button" onClick={() => void addWithAI()} disabled={busy || !input.trim() || loadFailed}>{busy ? <span className="spinner"/> : <Icon name="plus" size={15}/>} {busy ? '整理中' : '添加任务'}</button></div></div><div className="status-line" role="status">{status || <><span className="local-dot"/>仅保存在本机 <span className="shortcut">拖动右下角调整大小</span></>}</div></footer>
+      <footer className="composer-area"><div className="composer-label"><span><Icon name="spark" size={14}/> 一句话，安排好</span><div className="composer-tools"><button className="text-button" onClick={() => startImport(() => api.chooseImportFiles())} disabled={busy}>导入文件</button><button className="text-button" onClick={() => startImport(() => api.importClipboardImage())} disabled={busy} title="也可以直接按 Ctrl+V 粘贴截图">粘贴截图</button><button className="text-button" onClick={() => openDraft()} disabled={busy}><Icon name="plus" size={12}/> 手动添加</button></div></div><div className={`composer ${busy ? 'busy' : ''}`}><textarea aria-label="自然语言任务" aria-keyshortcuts="Enter Shift+Enter" placeholder="比如：明天下午 3 点开会，提前 10 分钟提醒" value={input} maxLength={4000} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); if (!event.repeat) void addWithAI(); } }} rows={2}/><div className="composer-bottom"><span>{busy ? '正在理解你的安排…' : 'Enter 发送 · Shift+Enter 换行'}</span><button className="add-button" onClick={() => void addWithAI()} disabled={busy || !input.trim() || loadFailed}>{busy ? <span className="spinner"/> : <Icon name="plus" size={15}/>} {busy ? '整理中' : '添加任务'}</button></div></div><div className="status-line" role="status">{status || <><span className="local-dot"/>仅保存在本机 <span className="shortcut">拖动右下角调整大小</span></>}</div></footer>
       <div className="panel-footer"><span><span className={`connection-dot ${settings?.hasApiKey ? 'connected' : ''}`}/>{settings?.hasApiKey ? 'DeepSeek 已连接' : '手动记录模式'}</span><button onClick={async () => { try { const paused = await value(api.setPaused(!settings?.paused)); setSettings(current => current ? { ...current, paused } : current); } catch (error) { setStatus(errorText(error)); } }}><Icon name="pin" size={11}/>{settings?.paused ? '已固定展开' : '贴边自动隐藏'}</button></div>
     </section>
     <button className="edge-handle" aria-label="展开或收起任务窗口" onPointerDown={handleDragStart} onPointerMove={handleDragMove} onPointerUp={handleDragEnd} onPointerCancel={handleDragEnd} onClick={handleHandleClick}><span className="handle-dot"/>轻任务<span className="handle-grip">•••</span></button>
     {([['right', '调整窗口宽度'], ['bottom', '调整窗口高度'], ['bottom-right', '调整窗口宽高']] as const).map(([edge, label]) => <div key={edge} className={`resize-handle resize-${edge}`} title={label} aria-label={label} onPointerDown={event => handleResizeStart(event, edge)} onPointerMove={handleResizeMove} onPointerUp={handleResizeEnd} onPointerCancel={handleResizeEnd} onLostPointerCapture={handleResizeEnd}>{edge === 'bottom-right' && <Icon name="resize" size={15}/>}</div>)}
 
+    {dragOver && !importSource && <div className="file-drop-overlay"><div><strong>松开，把通知交给轻任务</strong><p>PDF · Word · 截图 · TXT / Markdown / CSV</p><span>一次最多 8 个文件，每个不超过 20 MB</span></div></div>}
+    {importSource && <ImportDialog source={importSource} hasKey={!!settings?.hasApiKey} onClose={closeImport} onSaved={saved => {
+      setTasks(current => [...saved, ...current]); closeImport(); setFilter('pending'); setCategory('全部'); setSearch('');
+      setStatus(`已导入 ${saved.length} 条待办，提醒已按预览安排。`);
+    }}/>}
     {settingsOpen && <Modal title={settings?.firstRun ? '欢迎使用轻任务' : '偏好设置'} subtitle="粘贴自己的 DeepSeek Key，即可用一句话安排任务。" onClose={() => { if (!settings?.firstRun) { setSettingsOpen(false); setApiKey(''); } else void saveSettings(); }}>
       <form onSubmit={event => void saveSettings(event)}>
         <label>DeepSeek API Key<input autoFocus type="password" autoComplete="off" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings?.hasApiKey ? '已加密保存，留空保持不变' : '在这里粘贴你的 API Key'}/></label>
         <div className="model-row"><label>模型<input value={model} onChange={event => setModel(event.target.value)} required maxLength={100}/></label><button type="button" className="secondary" disabled={settingsBusy || (!apiKey && !settings?.hasApiKey)} onClick={() => void testKey()}>{settingsBusy ? '请稍候…' : '测试连接'}</button></div>
         <label className="checkbox-label"><input type="checkbox" checked={startAtLogin} onChange={event => setStartAtLogin(event.target.checked)}/> 开机时自动启动到系统托盘</label>
+        <label className="checkbox-label"><input type="checkbox" checked={reminderSoundEnabled} onChange={event => setReminderSoundEnabled(event.target.checked)}/> 开启提醒提示音</label>
+        <div className="sound-folder-row"><p className="field-hint sound-hint">把多个 .wav、.mp3 等音频放入文件夹，提醒时会按文件名依次播放并循环。</p><button type="button" className="secondary" onClick={async () => { try { await value(api.openReminderAudioFolder()); setSettingsStatus('音频文件夹已打开，把音频文件放进去即可。'); } catch (error) { setSettingsStatus(errorText(error)); } }}>打开音频文件夹</button></div>
+        <div className="theme-picker"><span className="theme-picker-label">主题颜色</span><div className="theme-options" role="radiogroup" aria-label="主题颜色"><button type="button" className={`theme-option theme-option-purple ${theme === 'purple' ? 'selected' : ''}`} aria-pressed={theme === 'purple'} onClick={() => setTheme('purple')}><span className="theme-swatch"/>紫色</button><button type="button" className={`theme-option theme-option-green ${theme === 'green' ? 'selected' : ''}`} aria-pressed={theme === 'green'} onClick={() => setTheme('green')}><span className="theme-swatch"/>绿色</button><button type="button" className={`theme-option theme-option-orange ${theme === 'orange' ? 'selected' : ''}`} aria-pressed={theme === 'orange'} onClick={() => setTheme('orange')}><span className="theme-swatch"/>橙色</button></div></div>
         <div className="window-size-options"><p>拖动右侧调宽、底边调高，或拖动右下角同时调整宽高。尺寸会自动保存。</p><button type="button" className="secondary" onClick={() => void resetWindowSize()}>恢复默认大小</button></div>
-        <div className="settings-note"><Icon name="check" size={15}/><p>Key 通过 Windows 本机加密保存。任务保存在本地；使用 AI 时仅发送你输入的任务描述。</p></div>
+        <div className="settings-note"><Icon name="check" size={15}/><p>Key 通过 Windows 本机加密保存。任务保存在本地；使用 AI 时会发送任务描述或导入文件中提取的文字。</p></div>
         {settings?.hasApiKey && <button type="button" className="danger-text" disabled={settingsBusy} onClick={() => void clearKey()}>删除本机保存的 Key</button>}
         <p className="form-message" role="status">{settingsStatus}</p>
         <div className="modal-actions"><span>也可以先不配置，手动使用。</span><button type="submit" className="primary" disabled={settingsBusy}>{settings?.firstRun ? '开始使用' : '保存设置'}</button></div>

@@ -1,7 +1,17 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 const invoke = <T>(channel: string, payload?: unknown) => ipcRenderer.invoke(channel, payload) as Promise<T>;
 contextBridge.exposeInMainWorld('taskDesk', {
+  chooseImportFiles: () => invoke('import:choose'),
+  importDroppedFiles: (files: File[]) => {
+    try { return invoke('import:drop', files.map(file => webUtils.getPathForFile(file))); }
+    catch { return Promise.resolve({ ok: false, error: '无法获取文件，请使用“选择文件”入口' }); }
+  },
+  importClipboardImage: () => invoke('import:clipboard'),
+  parseImportedDocuments: (documents: unknown) => invoke('import:parse', documents),
+  saveImportedTasks: (tasks: unknown) => invoke('import:save', tasks),
+  cancelImport: () => ipcRenderer.send('import:cancel'),
+  onImportProgress: (handler: (progress: unknown) => void) => subscribe('import:progress', handler),
   getTasks: () => invoke('tasks:list'),
   saveTask: (task: unknown) => invoke('tasks:save', task),
   deleteTask: (id: string) => invoke('tasks:delete', id),
@@ -9,6 +19,7 @@ contextBridge.exposeInMainWorld('taskDesk', {
   respondReminder: (id: string, response: string) => invoke('reminder:respond', { id, response }),
   parseTask: (input: string) => invoke('ai:parse-task', input),
   getSettings: () => invoke('settings:get'),
+  openReminderAudioFolder: () => invoke('audio:open-folder'),
   saveSettings: (settings: unknown) => invoke('settings:save', settings),
   testApiKey: (input: unknown) => invoke('ai:test-key', input),
   setPaused: (paused: boolean) => invoke('window:set-paused', paused),
@@ -23,7 +34,7 @@ contextBridge.exposeInMainWorld('taskDesk', {
   hideWindow: () => ipcRenderer.send('window:hide'),
   showWindow: () => ipcRenderer.send('window:show'),
   toggleWindow: () => ipcRenderer.send('window:toggle'),
-  onReminder: (handler: (task: unknown) => void) => subscribe('reminder', handler),
+  onReminder: (handler: (task: unknown, sound?: unknown) => void) => subscribe('reminder', handler),
   onSettings: (handler: () => void) => subscribe('open-settings', handler),
   onPaused: (handler: (paused: boolean) => void) => subscribe('paused-changed', handler),
 });

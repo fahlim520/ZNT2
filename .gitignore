@@ -36,6 +36,17 @@ qq-slide-task-manager/
 *.tmp
 *.log
 
+# Personal reminder audio stays on each user's computer
+reminder-audio/
+提醒音频/
+*.aac
+*.flac
+*.m4a
+*.mp3
+*.ogg
+*.wav
+*.webm
+
 # Editor / OS files
 .idea/
 .vscode/

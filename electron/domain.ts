@@ -1,7 +1,10 @@
 export const CATEGORIES = ['工作', '生活', '学习', '其他'] as const;
 export type Category = typeof CATEGORIES[number];
+export const THEMES = ['purple', 'green', 'orange'] as const;
+export type Theme = typeof THEMES[number];
 export type ReminderMode = 'default' | 'custom' | 'none';
 export interface Task {
+  sourceType?: 'text' | 'file';
   id: string;
   title: string;
   dueAt?: string;
@@ -19,6 +22,7 @@ export interface Task {
   responseDueAt?: string;
 }
 export interface TaskInput {
+  sourceType?: 'text' | 'file';
   id?: string;
   title: string;
   dueAt?: string | null;
@@ -35,10 +39,20 @@ export interface Settings {
   paused: boolean;
   startAtLogin: boolean;
   firstRun: boolean;
+  reminderSoundEnabled: boolean;
+  theme: Theme;
 }
-export interface SettingsInput { apiKey?: string; model?: string; startAtLogin?: boolean }
+export interface SettingsInput { apiKey?: string; model?: string; startAtLogin?: boolean; reminderSoundEnabled?: boolean; theme?: Theme }
+export interface ReminderSound { dataUrl: string; name: string; index: number; total: number }
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 export interface DesktopApi {
+  chooseImportFiles(): Promise<Result<import('./import-domain').ImportedDocument[]>>;
+  importDroppedFiles(files: File[]): Promise<Result<import('./import-domain').ImportedDocument[]>>;
+  importClipboardImage(): Promise<Result<import('./import-domain').ImportedDocument[]>>;
+  parseImportedDocuments(documents: import('./import-domain').ImportedDocument[]): Promise<Result<import('./import-domain').ImportCandidate[]>>;
+  saveImportedTasks(tasks: TaskInput[]): Promise<Result<Task[]>>;
+  cancelImport(): void;
+  onImportProgress(handler: (progress: import('./import-domain').ImportProgress) => void): () => void;
   getTasks(): Promise<Result<Task[]>>;
   saveTask(task: TaskInput): Promise<Result<Task>>;
   deleteTask(id: string): Promise<Result<boolean>>;
@@ -46,6 +60,7 @@ export interface DesktopApi {
   respondReminder(id: string, response: string): Promise<Result<Task>>;
   parseTask(input: string): Promise<Result<TaskInput>>;
   getSettings(): Promise<Result<Settings>>;
+  openReminderAudioFolder(): Promise<Result<boolean>>;
   saveSettings(input: SettingsInput): Promise<Result<Settings>>;
   testApiKey(input: { apiKey?: string; model: string }): Promise<Result<boolean>>;
   setPaused(paused: boolean): Promise<Result<boolean>>;
@@ -62,7 +77,7 @@ export interface DesktopApi {
   toggleWindow(): void;
   onSettings(handler: () => void): () => void;
   onPaused(handler: (paused: boolean) => void): () => void;
-  onReminder(handler: (task: Task) => void): () => void;
+  onReminder(handler: (task: Task, sound?: ReminderSound) => void): () => void;
 }
 
 function text(value: unknown, label: string, max: number, required = false): string {
@@ -80,11 +95,16 @@ export function isoDate(value: unknown, label: string): string | undefined {
   if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) throw new Error(`${label}需要带时区的有效日期`);
   const time = Date.parse(value);
   if (!Number.isFinite(time)) throw new Error(`${label}不是有效日期`);
+  // Date.parse silently rolls dates such as February 30 into March.
+  const calendarDay = value.slice(0, 10);
+  if (new Date(`${calendarDay}T00:00:00Z`).toISOString().slice(0, 10) !== calendarDay
+    || Number(value.slice(11, 13)) > 23) throw new Error(`${label}不是有效日期`);
   return new Date(time).toISOString();
 }
-export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title' | 'category' | 'notes' | 'sourceText' | 'reminderMode'>> & Pick<TaskInput, 'id' | 'dueAt' | 'reminderAt' | 'reminderTimes'> {
+export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title' | 'category' | 'notes' | 'sourceText' | 'reminderMode'>> & Pick<TaskInput, 'id' | 'dueAt' | 'reminderAt' | 'reminderTimes' | 'sourceType'> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('任务格式不正确');
   const raw = value as Record<string, unknown>;
+  if (raw.sourceType !== undefined && !['text', 'file'].includes(raw.sourceType as string)) throw new Error('任务来源不正确');
   const title = text(raw.title, '任务名称', 500, true);
   const category = raw.category ?? '其他';
   if (!CATEGORIES.includes(category as Category)) throw new Error('请选择有效分类');
@@ -106,7 +126,7 @@ export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title'
     if (Date.parse(reminderAt) > Date.parse(dueAt)) throw new Error('提醒时间不能晚于截止时间');
   }
   if (reminderTimes?.some(item => dueAt && Date.parse(item) > Date.parse(dueAt))) throw new Error('提醒时间不能晚于截止时间');
-  return { id: raw.id ? text(raw.id, '任务编号', 100, true) : undefined, title, category: category as Category, dueAt, reminderAt, reminderTimes, reminderMode: mode as ReminderMode, notes: text(raw.notes, '备注', 4000), sourceText: text(raw.sourceText, '原始输入', 4000) };
+  return { id: raw.id ? text(raw.id, '任务编号', 100, true) : undefined, sourceType: raw.sourceType as TaskInput['sourceType'], title, category: category as Category, dueAt, reminderAt, reminderTimes, reminderMode: mode as ReminderMode, notes: text(raw.notes, '备注', 4000), sourceText: text(raw.sourceText, '原始输入', 4000) };
 }
 export function saveTaskRecord(input: unknown, existing: Task | undefined, id: string, now = new Date().toISOString()): Task {
   const clean = normalizeInput(input);

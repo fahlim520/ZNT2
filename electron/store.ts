@@ -1,8 +1,20 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Task } from './domain';
+import type { Task, Theme } from './domain';
 
-export interface StoredSettings { encryptedApiKey?: string; model?: string; paused?: boolean; startAtLogin?: boolean; setupDone?: boolean; dockX?: number; dockWidth?: number; dockHeight?: number }
+export interface StoredSettings {
+  encryptedApiKey?: string;
+  model?: string;
+  paused?: boolean;
+  startAtLogin?: boolean;
+  setupDone?: boolean;
+  dockX?: number;
+  dockWidth?: number;
+  dockHeight?: number;
+  reminderSoundEnabled?: boolean;
+  reminderSoundIndex?: number;
+  theme?: Theme;
+}
 
 // One writer (the main process), atomic replacement, and a previous good copy.
 export class LocalStore {

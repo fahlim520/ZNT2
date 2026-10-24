@@ -1,10 +1,14 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, powerMonitor, screen, Tray, Menu, safeStorage, type IpcMainInvokeEvent, type IpcMainEvent } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, Notification, powerMonitor, screen, shell, Tray, Menu, safeStorage, utilityProcess, type IpcMainInvokeEvent, type IpcMainEvent } from 'electron';
 import * as path from 'node:path';
+import * as os from 'node:os';
+import * as nodeFs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DockWindow } from './dock';
 import { LocalStore } from './store';
-import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, testConnection } from './ai';
-import { normalizeInput, saveTaskRecord, toggleTaskRecord, isReminderDue, reminderSchedule, parseReminderResponse, type Result, type Settings, type SettingsInput, type Task, type TaskInput } from './domain';
+import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, parseDocuments, testConnection } from './ai';
+import { IMPORT_EXTENSIONS, IMPORT_LIMITS, type ImportedDocument } from './import-domain';
+import { normalizeInput, saveTaskRecord, toggleTaskRecord, isReminderDue, reminderSchedule, parseReminderResponse, THEMES, type ReminderSound, type Result, type Settings, type SettingsInput, type Task, type TaskInput, type Theme } from './domain';
 
 app.setAppUserModelId('com.local.qqslidetask');
 // Tests use a separate directory and never touch real tasks or credentials.
@@ -16,6 +20,10 @@ let tray: Tray;
 let quitting = false;
 let reminderTimer: NodeJS.Timeout;
 let parseBusy = false;
+let importBusy = false;
+let importWorker: Electron.UtilityProcess | undefined;
+let importController: AbortController | undefined;
+let importedDocuments: ImportedDocument[] = [];
 let notificationErrorShown = false;
 const activeNotifications = new Set<Notification>();
 
@@ -29,7 +37,8 @@ function readKey() {
 function hasKey() { try { return Boolean(readKey()); } catch { return false; } }
 function settings(): Settings {
   const value = store.settings();
-  return { hasApiKey: hasKey(), model: value.model || DEFAULT_MODEL, paused: dock?.paused ?? Boolean(value.paused), startAtLogin: app.isPackaged ? app.getLoginItemSettings().openAtLogin : false, firstRun: !value.setupDone };
+  const theme: Theme = value.theme && THEMES.includes(value.theme) ? value.theme : 'green';
+  return { hasApiKey: hasKey(), model: value.model || DEFAULT_MODEL, paused: dock?.paused ?? Boolean(value.paused), startAtLogin: app.isPackaged ? app.getLoginItemSettings().openAtLogin : false, firstRun: !value.setupDone, reminderSoundEnabled: value.reminderSoundEnabled !== false, theme };
 }
 function validateKey(value: unknown): string {
   if (typeof value !== 'string' || value.length > 500 || !value.trim() || /\s/.test(value.trim())) throw new Error('请输入有效的 DeepSeek API Key');
@@ -67,11 +76,54 @@ function refreshTray() {
   ]));
 }
 
+const REMINDER_AUDIO_EXTENSIONS = new Set(['.aac', '.flac', '.m4a', '.mp3', '.ogg', '.wav', '.webm']);
+const REMINDER_AUDIO_MIME: Record<string, string> = {
+  '.aac': 'audio/aac', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.webm': 'audio/webm',
+};
+function reminderAudioDirectory() {
+  return path.join(app.getPath('documents'), '轻任务', '提醒音频');
+}
+function reminderAudioFiles(): string[] {
+  const preferred = reminderAudioDirectory();
+  nodeFs.mkdirSync(preferred, { recursive: true });
+  const legacy = path.join(app.getPath('documents'), 'QQ滑出任务管家', '提醒音频');
+  const fallback = path.join(app.getPath('userData'), 'reminder-audio');
+  const directories = [preferred, legacy, fallback];
+  for (const directory of directories) {
+    try {
+      const files = nodeFs.readdirSync(directory, { withFileTypes: true })
+        .filter(entry => entry.isFile() && REMINDER_AUDIO_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
+        .map(entry => path.join(directory, entry.name))
+        .sort((a, b) => path.basename(a).localeCompare(path.basename(b), 'zh-CN'));
+      if (files.length) return files;
+    } catch { /* The audio folder is optional. */ }
+  }
+  return [];
+}
+function nextReminderSound(): ReminderSound | undefined {
+  const files = reminderAudioFiles();
+  if (!files.length) return undefined;
+  const saved = store.settings();
+  const rawIndex = Number.isInteger(saved.reminderSoundIndex) && (saved.reminderSoundIndex as number) >= 0 ? saved.reminderSoundIndex as number : 0;
+  const index = rawIndex % files.length;
+  const filename = files[index];
+  try {
+    const extension = path.extname(filename).toLowerCase();
+    const data = nodeFs.readFileSync(filename).toString('base64');
+    store.saveSettings({ ...saved, reminderSoundIndex: (index + 1) % files.length });
+    return { dataUrl: `data:${REMINDER_AUDIO_MIME[extension] || 'application/octet-stream'};base64,${data}`, name: path.basename(filename), index, total: files.length };
+  } catch {
+    return undefined;
+  }
+}
+
 function repairLegacyDateOnlyTasks(): Task[] {
   const tasks = store.tasks();
   const now = Date.now();
   let changed = false;
   for (const task of tasks) {
+    if (task.sourceType === 'file') continue;
     const clockRepair = repairOverriddenClockTask(task);
     if (clockRepair) {
       Object.assign(task, saveTaskRecord(clockRepair, task, task.id, new Date(now).toISOString()));
@@ -122,11 +174,12 @@ function checkReminders() {
       task.updatedAt = new Date(now).toISOString();
       changed = true;
       const snapshot = { ...task };
+      const sound = store.settings().reminderSoundEnabled === false ? undefined : nextReminderSound();
       dock.show(true);
-      window.webContents.send('reminder', snapshot);
+      window.webContents.send('reminder', snapshot, sound);
 
       if (Notification.isSupported()) {
-        const notification = new Notification({ title: '轻任务 · 该行动啦', body: `${task.title}（请回复“好”或“再提醒我30分钟后”）`, silent: false });
+        const notification = new Notification({ title: '轻任务 · 该行动啦', body: `${task.title}（请回复“好”或“再提醒我30分钟后”）`, silent: true });
         activeNotifications.add(notification);
         notification.on('click', () => { dock.show(true); window.webContents.send('reminder', snapshot); activeNotifications.delete(notification); });
         notification.on('close', () => activeNotifications.delete(notification));
@@ -144,6 +197,97 @@ function checkReminders() {
 }
 
 function registerIpc() {
+  const importProgress = (message: string) => { if (!window.isDestroyed()) window.webContents.send('import:progress', { message }); };
+  const extract = async (paths: string[]) => {
+    const resources = app.isPackaged ? path.join(process.resourcesPath, 'import-resources') : path.join(app.getAppPath(), 'electron', 'resources');
+    const controller = new AbortController(); importController = controller;
+    try {
+      const documents = await new Promise<ImportedDocument[]>((resolve, reject) => {
+        const worker = utilityProcess.fork(path.join(__dirname, 'import-worker.js'), [], { serviceName: '轻任务文件识别', stdio: 'ignore' });
+        worker.once('spawn', () => worker.postMessage({ type: 'extract', paths, resources }));
+        importWorker = worker;
+        let done = false;
+        const timer = setTimeout(() => { worker.postMessage('cancel'); reject(new Error('文件识别超时，请拆分文件后重试')); setTimeout(() => worker.kill(), 2000).unref(); }, 180_000);
+        const cancel = () => { worker.postMessage('cancel'); setTimeout(() => worker.kill(), 2000).unref(); reject(new Error('已取消导入')); };
+        controller.signal.addEventListener('abort', cancel, { once: true });
+        const cleanup = () => { clearTimeout(timer); controller.signal.removeEventListener('abort', cancel); if (importWorker === worker) importWorker = undefined; };
+        worker.on('message', (message: { progress?: string; documents?: ImportedDocument[]; error?: string }) => {
+          if (message.progress && !controller.signal.aborted) importProgress(message.progress);
+          if (message.documents) { done = true; cleanup(); resolve(message.documents); }
+          if (message.error) { done = true; cleanup(); reject(new Error(message.error)); }
+        });
+        worker.once('error', () => { cleanup(); reject(new Error('文件识别进程发生错误，请重试或更换文件')); });
+        worker.once('exit', () => { cleanup(); if (!done) reject(new Error(controller.signal.aborted ? '已取消导入' : '文件识别进程退出，请换用较小的文件')); });
+      });
+      if (controller.signal.aborted) throw new Error('已取消导入');
+      importedDocuments = documents;
+      return documents;
+    } finally { if (importController === controller) importController = undefined; }
+  };
+  const runImport = async (action: () => Promise<ImportedDocument[]>) => {
+    if (importBusy) throw new Error('正在识别文件，请稍候或取消');
+    importBusy = true;
+    try { return await action(); } finally { importBusy = false; }
+  };
+  handle('import:choose', () => runImport(async () => {
+    const selection = await dialog.showOpenDialog(window, { title: '导入通知或截图', properties: ['openFile', 'multiSelections'], filters: [{ name: '支持的文档和图片', extensions: IMPORT_EXTENSIONS }, { name: '所有文件', extensions: ['*'] }] });
+    if (selection.canceled || !selection.filePaths.length) return [];
+    return extract(selection.filePaths);
+  }));
+  handle('import:drop', (paths: string[]) => runImport(() => extract(paths)));
+  handle('import:clipboard', () => runImport(async () => {
+    const image = clipboard.readImage();
+    if (image.isEmpty()) throw new Error('剪贴板里没有图片，请先截图或复制图片');
+    const size = image.getSize();
+    if (size.width * size.height > 80_000_000) throw new Error('剪贴板图片过大，请裁剪后重试');
+    const png = image.toPNG();
+    if (png.length > IMPORT_LIMITS.fileBytes) throw new Error('截图超过 20 MB，请裁剪后重试');
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qing-task-paste-'));
+    const filename = path.join(directory, '粘贴截图.png');
+    try { await fs.writeFile(filename, png); return await extract([filename]); }
+    finally { await fs.rm(directory, { force: true, recursive: true }).catch(() => {}); }
+  }));
+  handle('import:parse', async (documents: ImportedDocument[]) => {
+    if (parseBusy || importBusy) throw new Error('正在处理上一条请求，请稍候');
+    if (!Array.isArray(documents) || !documents.length || documents.length > IMPORT_LIMITS.files) throw new Error('请先导入文件');
+    let length = 0;
+    const seen = new Set<string>();
+    const checked = documents.map(item => {
+      if (!item || typeof item.id !== 'string' || typeof item.text !== 'string' || seen.has(item.id)) throw new Error('文件内容格式不正确');
+      seen.add(item.id);
+      const original = importedDocuments.find(original => original.id === item.id && !original.error);
+      if (!original) throw new Error('导入会话已结束，请重新选择文件');
+      length += item.text.length;
+      if (length > IMPORT_LIMITS.text) throw new Error('文字合计不能超过 5 万字，请拆分导入');
+      return { ...original, text: item.text.trim() };
+    }).filter(item => item.text);
+    if (!checked.length) throw new Error('识别原文为空，请先补充文字');
+    const key = readKey();
+    if (!key) throw new Error('尚未配置 DeepSeek，可以根据识别原文手动创建任务');
+    parseBusy = true;
+    const controller = new AbortController(); importController = controller;
+    importProgress('正在把通知整理为待办，并核对时间…');
+    try { return await parseDocuments(checked, key, store.settings().model || DEFAULT_MODEL, controller.signal); }
+    finally { parseBusy = false; if (importController === controller) importController = undefined; }
+  });
+  handle('import:save', (inputs: TaskInput[]) => {
+    if (!Array.isArray(inputs) || !inputs.length || inputs.length > IMPORT_LIMITS.tasks) throw new Error('请选择 1–40 条任务');
+    // Validate the entire batch before writing so a bad final task cannot leave
+    // a partly imported list. File candidates always create new task IDs.
+    const now = new Date().toISOString();
+    const tasks = inputs.map(input => {
+      if (!input || input.id) throw new Error('导入任务格式不正确');
+      return saveTaskRecord({ ...input, sourceType: 'file' }, undefined, randomUUID(), now);
+    });
+    store.saveTasks([...tasks, ...store.tasks()]);
+    importedDocuments = [];
+    setTimeout(checkReminders, 250);
+    return tasks;
+  });
+  ipcMain.on('import:cancel', event => {
+    if (!trusted(event)) return;
+    importController?.abort(); importedDocuments = [];
+  });
   handle('tasks:list', () => repairLegacyDateOnlyTasks());
   handle('tasks:save', (input: TaskInput) => {
     const clean = normalizeInput(input);
@@ -198,6 +342,13 @@ function registerIpc() {
     return updated;
   });
   handle('settings:get', settings);
+  handle('audio:open-folder', async () => {
+    const directory = reminderAudioDirectory();
+    nodeFs.mkdirSync(directory, { recursive: true });
+    const error = await shell.openPath(directory);
+    if (error) throw new Error(error);
+    return true;
+  });
   handle('settings:save', (input: SettingsInput) => {
     if (!input || typeof input !== 'object') throw new Error('设置格式不正确');
     const value = { ...store.settings(), setupDone: true };
@@ -214,6 +365,14 @@ function registerIpc() {
       if (typeof input.startAtLogin !== 'boolean') throw new Error('启动选项不正确');
       if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: input.startAtLogin, path: process.execPath, args: ['--startup'] });
       value.startAtLogin = input.startAtLogin;
+    }
+    if (input.reminderSoundEnabled !== undefined) {
+      if (typeof input.reminderSoundEnabled !== 'boolean') throw new Error('提示音开关格式不正确');
+      value.reminderSoundEnabled = input.reminderSoundEnabled;
+    }
+    if (input.theme !== undefined) {
+      if (typeof input.theme !== 'string' || !THEMES.includes(input.theme as Theme)) throw new Error('主题颜色不正确');
+      value.theme = input.theme as Theme;
     }
     store.saveSettings(value);
     return settings();
@@ -254,11 +413,13 @@ function registerIpc() {
 
 function boot() {
   store = new LocalStore(app.getPath('userData'));
+  nodeFs.mkdirSync(reminderAudioDirectory(), { recursive: true });
   const savedSettings = store.settings();
   const g = dockGeometryPrimary();
   const iconPath = path.join(app.getAppPath(), 'assets', 'icon.png');
   window = new BrowserWindow({
-    ...g, x: g.x, y: g.hiddenY, title: '轻任务 · QQ 滑出任务管家',
+    ...g, x: g.x, y: g.hiddenY, title: '轻任务',
+    icon: iconPath,
     // Avoid a fully transparent native surface on Windows. Some GPU/display
     // combinations create the BrowserWindow correctly but fail to composite
     // the renderer, leaving the app invisible even though it is running.
@@ -286,7 +447,7 @@ function boot() {
   window.once('ready-to-show', () => dock.start(true));
   window.on('closed', () => { dock.dispose(); });
   window.on('blur', () => { dock.endResize(); dock.endDrag(); });
-  tray = new Tray(nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect rx="9" width="32" height="32" fill="#46a876"/><path d="m8 16 5 5L25 9" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>').toString('base64')}`));
+  tray = new Tray(nativeImage.createFromPath(iconPath).resize({ width: 32, height: 32 }));
   tray.setToolTip('轻任务 · 鼠标移到屏幕顶部即可展开');
   tray.on('click', () => dock.show(true));
   tray.on('double-click', () => dock.show(true));
@@ -310,5 +471,5 @@ else {
   app.on('second-instance', () => dock?.show(true));
   app.on('activate', () => dock?.show(true));
   app.on('window-all-closed', () => { /* Keep the tray app alive. */ });
-  app.on('before-quit', () => { quitting = true; clearInterval(reminderTimer); dock?.dispose(); tray?.destroy(); });
+  app.on('before-quit', () => { quitting = true; importController?.abort(); importWorker?.kill(); clearInterval(reminderTimer); dock?.dispose(); tray?.destroy(); });
 }
