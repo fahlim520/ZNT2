@@ -1,6 +1,6 @@
 {
   "name": "qing-task",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "A classic QQ-style top edge task manager for Windows.",
   "main": "dist-electron/main.js",
   "author": "Local",

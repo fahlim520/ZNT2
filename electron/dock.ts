@@ -1,6 +1,9 @@
 import { BrowserWindow, screen } from 'electron';
 import { DEFAULT_DOCK_SIZE, dockGeometry, type DockSize, type ResizeEdge } from './domain';
 
+const INITIAL_SHOW_GRACE_MS = 2_000;
+const OUTSIDE_HIDE_DELAY_MS = 120;
+
 // Hide all but the bottom 8px edge strip. The handle must be at the bottom of
 // the renderer, otherwise a negative window Y would hide the trigger itself.
 export class DockWindow {
@@ -53,7 +56,7 @@ export class DockWindow {
       // Keep the first launch open long enough for the user to notice the
       // window and discover the top-edge handle. It will still return to the
       // edge automatically after this short onboarding period.
-      this.startupVisibleUntil = Date.now() + 60_000;
+      this.startupVisibleUntil = Date.now() + INITIAL_SHOW_GRACE_MS;
       this.window.show();
       this.window.focus();
     } else {
@@ -205,9 +208,13 @@ export class DockWindow {
         && p.x >= b.x && p.x < b.x + b.width && p.y >= b.y && p.y < b.y + b.height;
       if (!this.targetExpanded && trigger && Date.now() >= this.suppressedUntil) this.show();
       if (Date.now() < this.startupVisibleUntil) { this.outsideSince = undefined; return; }
-      if (!this.targetExpanded || this.animation || this.paused || this.keepOpen || inside) { this.outsideSince = undefined; return; }
+      // A focused editor/modal should stay open while the user is working.
+      // Once another app takes focus, renderer focus state can remain latched;
+      // do not let that stale keep-open flag block auto-hide indefinitely.
+      const keepOpen = this.keepOpen && this.window.isFocused();
+      if (!this.targetExpanded || this.animation || this.paused || keepOpen || inside) { this.outsideSince = undefined; return; }
       this.outsideSince ??= Date.now();
-      if (Date.now() - this.outsideSince >= 120) this.hide();
+      if (Date.now() - this.outsideSince >= OUTSIDE_HIDE_DELAY_MS) this.hide();
     } catch {
       // Windows can briefly report incomplete display metrics during resume,
       // docking, or display changes. Keep the tray app alive and retry next tick.

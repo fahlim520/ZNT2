@@ -5,9 +5,10 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { LocalStore } = require('../dist-electron/store');
 
-function fixture(initialSize = {}, initialX = 500, onSizeChange = () => {}) {
+function fixture(initialSize = {}, initialX = 500, onSizeChange = () => {}, showInitially = false) {
   const display = { bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 } };
   const cursor = { x: 0, y: 0 };
+  let focused = true;
   let now = 1000;
   const intervals = new Set();
   const window = {
@@ -17,6 +18,7 @@ function fixture(initialSize = {}, initialX = 500, onSizeChange = () => {}) {
     getBounds() { return { ...this.bounds }; },
     setMinimumSize(width, height) { this.min = [width, height]; },
     setMaximumSize(width, height) { this.max = [width, height]; },
+    isFocused() { return focused; },
     setBounds(bounds) {
       this.bounds = { ...bounds,
         width: Math.min(this.max[0] || Infinity, Math.max(this.min[0], bounds.width)),
@@ -36,11 +38,37 @@ function fixture(initialSize = {}, initialX = 500, onSizeChange = () => {}) {
     clearInterval: fn => intervals.delete(fn),
   });
   const dock = new module.exports.DockWindow(window, initialX, () => {}, initialSize, onSizeChange);
-  dock.start(false);
+  dock.start(showInitially);
   return { dock, window, cursor, display,
+    setFocused(value) { focused = value; },
     advance(ms) { now += ms; for (const fn of [...intervals]) fn(); },
   };
 }
+
+test('initial visibility grace is short and then auto-hides when the pointer is outside', () => {
+  const { dock, window, advance } = fixture({}, 500, () => {}, true);
+  advance(2100);
+  assert.equal(window.bounds.y, 0);
+  advance(120);
+  advance(120);
+  assert.equal(window.bounds.y, -642);
+  dock.dispose();
+});
+
+test('a stale keep-open flag cannot block auto-hide after the window loses focus', () => {
+  const { dock, window, advance, setFocused } = fixture();
+  dock.show(true);
+  advance(200);
+  dock.setKeepOpen(true);
+  advance(120);
+  assert.equal(window.bounds.y, 0);
+  setFocused(false);
+  advance(120);
+  advance(120);
+  advance(120);
+  assert.equal(window.bounds.y, -642);
+  dock.dispose();
+});
 
 test('corner resizing changes both dimensions and hidden geometry follows the new height', () => {
   const saved = [];
