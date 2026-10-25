@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { dockGeometry, normalizeInput, saveTaskRecord, toggleTaskRecord, parseReminderResponse, reminderSchedule } = require('../dist-electron/domain');
-const { applyDateOnlySchedule, applyTaskSchedule, parseTask, repairOverriddenClockTask } = require('../dist-electron/ai');
+const { applyDateOnlySchedule, applyTaskSchedule, parseTask, parseReminderReply, repairOverriddenClockTask } = require('../dist-electron/ai');
 
 const baseNow = '2026-10-24T00:00:00.000Z';
 test('default reminder is calculated one hour before due time', () => {
@@ -52,12 +52,49 @@ test('task input validates title, category, and timezone', () => {
 test('reminder replies complete or snooze a task', () => {
   assert.deepEqual(parseReminderResponse('好', Date.parse(baseNow)), { type: 'complete' });
   assert.deepEqual(parseReminderResponse('OK', Date.parse(baseNow)), { type: 'complete' });
+  assert.deepEqual(parseReminderResponse('好的', Date.parse(baseNow)), { type: 'complete' });
+  assert.deepEqual(parseReminderResponse('hao', Date.parse(baseNow)), { type: 'complete' });
+  assert.deepEqual(parseReminderResponse('好的，我马上处理', Date.parse(baseNow)), { type: 'complete' });
   assert.equal(parseReminderResponse('我会执行的', Date.parse(baseNow)).type, 'complete');
   assert.equal(parseReminderResponse('再提醒我 30 分钟后', Date.parse(baseNow)).reminderAt, '2026-10-24T00:30:00.000Z');
   assert.equal(parseReminderResponse('明天上午9点再提醒我', Date.parse(baseNow)).reminderAt, '2026-10-25T01:00:00.000Z');
   assert.equal(parseReminderResponse('今天15.05再提醒我', Date.parse(baseNow)).reminderAt, '2026-10-24T07:05:00.000Z');
   assert.equal(parseReminderResponse('今天15：05再提醒我', Date.parse(baseNow)).reminderAt, '2026-10-24T07:05:00.000Z');
   assert.throws(() => parseReminderResponse('今天15.65再提醒我', Date.parse(baseNow)), /提醒时间无效/);
+});
+test('AI reminder replies are classified by intent instead of fixed words', async context => {
+  let answer = { intent: 'complete', delayMinutes: null, date: null, time: null, message: '' };
+  context.mock.method(globalThis, 'fetch', async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.match(body.messages[0].content, /不要要求固定关键词/);
+    return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(answer) } }] }) };
+  });
+  assert.deepEqual(await parseReminderReply('好的，我已经安排上了', '整理电脑', 'test-key', 'test-model', new Date(baseNow)), { type: 'complete' });
+  answer = { intent: 'snooze', delayMinutes: 30, date: null, time: null, message: '' };
+  assert.equal((await parseReminderReply('半小时后再提醒我', '整理电脑', 'test-key', 'test-model', new Date(baseNow))).reminderAt, '2026-10-24T00:30:00.000Z');
+});
+test('AI reminder replies preserve uncertainty and validate future calendar times', async context => {
+  let answer = { intent: 'unclear', message: '请说明多久后再次提醒。' };
+  context.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(answer) } }] }) }));
+  const parse = () => parseReminderReply('晚点再提醒我', '整理电脑', 'test-key', 'test-model', new Date(baseNow));
+  assert.equal((await parse()).type, 'unclear');
+  answer = { intent: 'snooze', date: '2026-10-25', time: '9:00' };
+  assert.equal((await parse()).reminderAt, '2026-10-25T01:00:00.000Z');
+  for (const value of [
+    { intent: 'snooze', date: '2026-02-30', time: '09:00' },
+    { intent: 'snooze', date: '2026-10-23', time: '09:00' },
+    { intent: 'snooze', delayMinutes: -30 },
+    { intent: 'snooze', date: '2026-10-25', time: '25:00' },
+  ]) {
+    answer = value;
+    assert.equal((await parse()).type, 'unclear');
+  }
+  answer = null;
+  await assert.rejects(parse(), /AI 返回的提醒回复格式不正确/);
+});
+test('AI reminder failures return actionable errors for offline fallback', async context => {
+  context.mock.method(globalThis, 'fetch', async () => ({ ok: false, status: 401 }));
+  await assert.rejects(parseReminderReply('hao', '整理电脑', 'test-key', 'test-model', new Date(baseNow)), /API Key 无效/);
 });
 test('date-only AI input remains a task and gets a reminder schedule', () => {
   const task = applyDateOnlySchedule({ title: '整理电脑', category: '生活', notes: '', sourceText: '今天我要整理电脑', reminderMode: 'none' }, '今天我要整理电脑', new Date(baseNow));
@@ -112,6 +149,20 @@ test('future explicit reminders use their clock rather than the vague-day queue'
   assert.equal(actual.reminderAt, '2026-10-26T07:05:00.000Z');
   assert.equal(actual.reminderTimes, undefined);
 });
+test('natural date and clock punctuation stays understandable', () => {
+  const now = new Date('2026-10-25T14:00:00+08:00');
+  const cases = [
+    ['今天晚上9.提醒我整理电脑', '2026-10-25T13:00:00.000Z'],
+    ['10.25晚上9.提醒我拉屎', '2026-10-25T13:00:00.000Z'],
+    ['今天12.30开会', '2026-10-25T03:30:00.000Z'],
+    ['今天15.05提醒我整理电脑', '2026-10-25T07:05:00.000Z'],
+    ['12:30提醒我吃饭', '2026-10-25T04:30:00.000Z'],
+  ];
+  for (const [source, expected] of cases) {
+    const actual = applyTaskSchedule({ title: '测试', dueAt: '2026-10-25T23:59:00+08:00', reminderMode: 'default' }, source, now);
+    assert.equal(actual.reminderAt, expected, source);
+  }
+});
 test('advance reminders, multiple clocks, relative durations and opt-outs are preserved', () => {
   const now = new Date(baseNow);
   const advance = normalizeInput({ title: '开会', dueAt: '2026-10-24T15:00:00+08:00', reminderAt: '2026-10-24T14:50:00+08:00', reminderMode: 'custom' });
@@ -126,8 +177,10 @@ test('advance reminders, multiple clocks, relative durations and opt-outs are pr
 });
 test('explicit deadlines without a reminder instruction retain the advance default', () => {
   const input = normalizeInput({ title: '整理电脑', dueAt: '2026-10-24T15:05:00+08:00', reminderMode: 'default' });
-  assert.deepEqual(applyTaskSchedule(input, '今天15.05我要整理电脑', new Date(baseNow)), input);
-  assert.equal(input.reminderAt, '2026-10-24T06:05:00.000Z');
+  const actual = applyTaskSchedule(input, '今天15.05我要整理电脑', new Date(baseNow));
+  assert.equal(actual.dueAt, input.dueAt);
+  assert.equal(actual.reminderAt, input.reminderAt);
+  assert.equal(actual.reminderMode, 'default');
 });
 test('only untouched tasks with the old override footprint are repaired', () => {
   const createdAt = '2026-10-24T07:04:32.405Z';

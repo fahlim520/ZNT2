@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { DockWindow } from './dock';
 import { LocalStore } from './store';
 import { initializeReminderAudioFolder, readNextReminderSound, resolveReminderAudioPaths } from './reminder-audio';
-import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, parseDocuments, testConnection } from './ai';
+import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, parseDocuments, parseReminderReply, testConnection } from './ai';
 import { IMPORT_EXTENSIONS, IMPORT_LIMITS, type ImportedDocument } from './import-domain';
 import { normalizeInput, saveTaskRecord, toggleTaskRecord, isReminderDue, reminderSchedule, parseReminderResponse, THEMES, type ReminderSound, type Result, type Settings, type SettingsInput, type Task, type TaskInput, type Theme } from './domain';
 
@@ -148,7 +148,7 @@ function checkReminders() {
       window.webContents.send('reminder', snapshot, sound);
 
       if (Notification.isSupported()) {
-        const notification = new Notification({ title: '轻任务 · 该行动啦', body: `${task.title}（请回复“好”或“再提醒我30分钟后”）`, silent: true });
+        const notification = new Notification({ title: '轻任务 · 该行动啦', body: `${task.title}（可用自然语言回复“已完成”或说明何时再提醒）`, silent: true });
         activeNotifications.add(notification);
         notification.on('click', () => { dock.show(true); window.webContents.send('reminder', snapshot); activeNotifications.delete(notification); });
         notification.on('close', () => activeNotifications.delete(notification));
@@ -283,20 +283,44 @@ function registerIpc() {
     setTimeout(checkReminders, 250);
     return updated;
   });
-  handle('reminder:respond', (input: { id: string; response: string }) => {
+  handle('reminder:respond', async (input: { id: string; response: string }) => {
     if (!input || typeof input.id !== 'string' || typeof input.response !== 'string') throw new Error('提醒回复格式不正确');
+    if (!input.response.trim() || input.response.trim().length > 500) throw new Error('请填写 1–500 字的提醒回复');
     const tasks = store.tasks();
     const task = tasks.find(item => item.id === input.id);
     if (!task) throw new Error('任务已不存在');
-    const response = parseReminderResponse(input.response);
+    let response: ReturnType<typeof parseReminderResponse>;
+    let aiError: unknown;
+    try {
+      const key = readKey();
+      response = key
+        ? await parseReminderReply(input.response, task.title, key, store.settings().model || DEFAULT_MODEL)
+        : parseReminderResponse(input.response);
+    } catch (error) {
+      aiError = error;
+      // A local fallback keeps short acknowledgements and explicit delays
+      // usable when the key, network, or model is temporarily unavailable.
+      response = parseReminderResponse(input.response);
+      if (response.type === 'unclear' && aiError instanceof Error && /API Key|DeepSeek|连接|超时|AI 返回/.test(aiError.message)) {
+        response = { type: 'unclear', message: '暂时无法连接 AI 判断这句回复，请明确写“已完成”，或写清楚多久后再次提醒。' };
+      }
+    }
+    if (response.type === 'unclear') throw new Error(response.message);
+    // An AI request yields to other task writes. Reload before saving so a
+    // reply cannot overwrite tasks created or edited while it was in flight.
+    const latestTasks = store.tasks();
+    const currentTask = latestTasks.find(item => item.id === input.id);
+    if (!currentTask) throw new Error('任务已不存在');
+    if (currentTask.completed) return currentTask;
+    if (currentTask.updatedAt !== task.updatedAt) throw new Error('任务刚刚有更新，请查看最新内容后重新回复。');
     let updated: Task;
     if (response.type === 'complete') {
-      updated = toggleTaskRecord(task, true);
+      updated = toggleTaskRecord(currentTask, true);
     } else {
       const now = Date.now();
-      const future = reminderSchedule(task).filter(item => Date.parse(item) > now && item !== task.reminderAt);
+      const future = reminderSchedule(currentTask).filter(item => Date.parse(item) > now && item !== currentTask.reminderAt);
       updated = {
-        ...task,
+        ...currentTask,
         reminderAt: response.reminderAt,
         reminderMode: 'custom',
         reminderTimes: future.length ? future : undefined,
@@ -306,7 +330,7 @@ function registerIpc() {
         updatedAt: new Date(now).toISOString(),
       };
     }
-    store.saveTasks(tasks.map(item => item.id === updated.id ? updated : item));
+    store.saveTasks(latestTasks.map(item => item.id === updated.id ? updated : item));
     setTimeout(checkReminders, 250);
     return updated;
   });

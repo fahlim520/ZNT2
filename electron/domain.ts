@@ -146,7 +146,10 @@ export function reminderSchedule(task: Pick<Task, 'reminderAt' | 'reminderTimes'
   return [...new Set([task.reminderAt, ...(task.reminderTimes || [])].filter((item): item is string => Boolean(item)))].sort((a, b) => Date.parse(a) - Date.parse(b));
 }
 
-export type ReminderResponse = { type: 'complete' } | { type: 'snooze'; reminderAt: string };
+export type ReminderResponse =
+  | { type: 'complete' }
+  | { type: 'snooze'; reminderAt: string }
+  | { type: 'unclear'; message: string };
 
 function chinaDateAt(base: Date, days: number, hour: number, minute = 0): string {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(base);
@@ -162,23 +165,55 @@ function durationMs(value: number, unit: string): number {
   return value * 60_000;
 }
 
+function chineseNumber(value: string): number | undefined {
+  if (/^\d+$/.test(value)) return Number(value);
+  const digits: Record<string, number> = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (value.includes('十')) {
+    const [tens, ones] = value.split('十');
+    return (tens ? digits[tens] : 1) * 10 + (ones ? digits[ones] : 0);
+  }
+  const parts = [...value].map(item => digits[item]);
+  return parts.length && parts.every(item => item !== undefined) ? Number(parts.join('')) : undefined;
+}
+
+function localReminderResponse(value: string, now = Date.now()): ReminderResponse {
+  const response = value.trim();
+  const normalized = response.toLowerCase().replace(/[\s\u3000]+/g, '');
+  // This is intentionally a fallback for when AI is unavailable. It accepts
+  // natural acknowledgements rather than requiring one exact word.
+  const wantsLater = /提醒|叫我|通知我|稍后|晚点|等会|一会|之后|以后|后再|later|snooze/i.test(normalized);
+  const relative = response.match(/(半|\d{1,3}(?:\.\d+)?|[零〇一二两三四五六七八九十]{1,4})\s*(分钟|分|小时|时|天|h|d)\s*(?:后)?/i);
+  if (relative) {
+    const amount = relative[1] === '半' ? 0.5 : /^\d/.test(relative[1]) ? Number(relative[1]) : chineseNumber(relative[1]);
+    if (wantsLater && amount !== undefined && amount > 0) return { type: 'snooze', reminderAt: new Date(now + durationMs(amount, relative[2].toLowerCase())).toISOString() };
+  }
+  if (wantsLater && /(?:一|1)刻钟/.test(normalized)) return { type: 'snooze', reminderAt: new Date(now + 15 * 60_000).toISOString() };
+  if (/(?:再提醒我|提醒我|叫我|通知我)/.test(response)) {
+    const dayOffset = /大后天/.test(response) ? 3 : /后天/.test(response) ? 2 : /明天/.test(response) ? 1 : 0;
+    const clock = response.match(/(上午|下午|晚上|早上|中午|凌晨|傍晚)?\s*(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})(?:点|时|[:：.．]\s*)(?:(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})\s*分?)?/);
+    if (clock) {
+      let hour = chineseNumber(clock[2]) ?? -1;
+      const minute = clock[3] ? chineseNumber(clock[3]) ?? -1 : 0;
+      if (/(下午|晚上|傍晚)/.test(clock[1] || '') && hour < 12) hour += 12;
+      if (clock[1] === '中午' && hour < 11) hour += 12;
+      if (/(凌晨|上午|早上)/.test(clock[1] || '') && hour === 12) hour = 0;
+      if (hour < 0 || hour > 23 || minute < 0 || minute > 59) throw new Error('提醒时间无效，请填写 0–23 点和 0–59 分');
+      const reminderAt = chinaDateAt(new Date(now), dayOffset, hour, minute);
+      if (Date.parse(reminderAt) > now) return { type: 'snooze', reminderAt };
+      return { type: 'unclear', message: '这个时间已经过去，请说明下一次提醒的日期和时间。' };
+    }
+  }
+  if (!wantsLater && !/不|没|未|别|等|但是|不过|\?|？|吗|么|吧|not|haven['’]?t|don['’]?t/i.test(normalized)) {
+    const clauses = normalized.replace(/[，,。.!！;；]+$/g, '').split(/[，,。.!！;；]+/);
+    const acknowledgement = /^(好(?:的)?(?:呀|啊|嘞|哦|哒|滴)?|行[的啊]?|可以[的]?|收到[了]?|知道了|明白了?|了解了?|没问题|ok(?:ay)?|hao(?:de)?|完成[了]?|已(?:经)?完成(?:了)?|(?:我)?(?:会|将)?(?:马上|现在就|现在)?(?:去)?(?:执行|处理|做|弄|搞定|安排)(?:了|的|好|上了?|这件事|这个任务)?|(?:我)?已经(?:处理|做|搞定|弄好|安排上)(?:了)?)$/i;
+    if (clauses.every(clause => acknowledgement.test(clause))) return { type: 'complete' };
+  }
+  return { type: 'unclear', message: '我没能确定你的意思，请说“已经完成”，或说明“多久后 / 什么时候再提醒”。' };
+}
+
 export function parseReminderResponse(value: unknown, now = Date.now()): ReminderResponse {
   const response = text(value, '回复内容', 500, true);
-  if (/^(好|好的|ok|okay|收到|知道了|明白了?|会执行|我会执行|完成|已完成|行|可以|马上处理|马上做|我去做)[。！!，, ]*$/i.test(response)
-    || /^(好的?，?|ok[，, ]?)?(我会|我将|马上|现在就)(执行|处理|去做)/i.test(response)) return { type: 'complete' };
-  const relative = response.match(/(?:再提醒我|提醒我|过|在)\s*(\d{1,3})\s*(分钟|分|小时|时|天|h|d)\s*(?:后)?/i);
-  if (relative) return { type: 'snooze', reminderAt: new Date(now + durationMs(Number(relative[1]), relative[2].toLowerCase())).toISOString() };
-  if (/(?:再提醒我|提醒我).*(今天|明天|后天)|(?:今天|明天|后天).*(?:再提醒我|提醒我)/.test(response)) {
-    const dayOffset = response.includes('后天') ? 2 : response.includes('明天') ? 1 : 0;
-    const clock = response.match(/(上午|下午|晚上|早上|中午)?\s*(\d{1,2})(?:点|[:：.．]\s*)(\d{1,2})?/);
-    let hour = clock ? Number(clock[2]) : 9;
-    const minute = clock?.[3] ? Number(clock[3]) : 0;
-    if (clock?.[1] && /下午|晚上/.test(clock[1]) && hour < 12) hour += 12;
-    if (hour > 23 || minute > 59) throw new Error('提醒时间无效，请填写 0–23 点和 0–59 分');
-    return { type: 'snooze', reminderAt: chinaDateAt(new Date(now), dayOffset, hour, minute) };
-  }
-  if (/(?:再提醒我|提醒我)/.test(response)) throw new Error('请写清楚再次提醒时间，例如“再提醒我 30 分钟后”');
-  throw new Error('请输入“好”完成任务，或输入“再提醒我 30 分钟后”');
+  return localReminderResponse(response, now);
 }
 export function parseModelTask(content: string, sourceText: string, adjustSchedule: (input: TaskInput) => TaskInput = input => input): TaskInput {
   let raw: Record<string, unknown>;
