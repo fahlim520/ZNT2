@@ -1,6 +1,6 @@
 {
   "name": "qing-task",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "A classic QQ-style top edge task manager for Windows.",
   "main": "dist-electron/main.js",
   "author": "Local",
@@ -49,19 +49,15 @@
       "output": "release"
     },
     "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "target": ["nsis"],
+      "artifactName": "${productName}-${version}-${arch}-安装版.${ext}",
       "signAndEditExecutable": true
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": false,
-      "createStartMenuShortcut": false,
-      "include": "build/installer.nsh",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
       "runAfterFinish": true
     },
     "extraResources": [

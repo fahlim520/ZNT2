@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { initializeReminderAudioFolder, reminderAudioFiles, readNextReminderSound } = require('../dist-electron/reminder-audio');
+const { initializeReminderAudioFolder, reminderAudioFiles, readNextReminderSound, resolveReminderAudioPaths } = require('../dist-electron/reminder-audio');
 const { LocalStore } = require('../dist-electron/store');
 const bundled = path.resolve(__dirname, '../assets/reminder-audio');
 const names = ['冰.wav', '牛.wav', '哇哦.wav'];
@@ -13,6 +13,26 @@ function temporaryDirectory(t) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test('application-managed audio writes stay out of protected Documents and migrate existing sounds read-only', t => {
+  const root = temporaryDirectory(t);
+  const userData = path.join(root, 'AppData', 'Roaming', 'qing-task');
+  const documents = path.join(root, 'Documents');
+  const appPath = path.join(root, 'resources', 'app.asar');
+  const locations = resolveReminderAudioPaths(userData, documents, appPath);
+  assert.equal(locations.directory, path.join(userData, 'reminder-audio'));
+  assert.equal(locations.sources[0], path.join(documents, '轻任务', '提醒音频'));
+  assert.equal(locations.sources[1], path.join(documents, 'QQ滑出任务管家', '提醒音频'));
+  assert.equal(locations.sources[2], path.join(appPath, 'assets', 'reminder-audio'));
+  assert.ok(!locations.directory.startsWith(documents));
+
+  fs.mkdirSync(locations.sources[0], { recursive: true });
+  const customSound = path.join(locations.sources[0], '自己的提示.wav');
+  fs.copyFileSync(path.join(bundled, names[0]), customSound);
+  initializeReminderAudioFolder(locations.directory, locations.sources);
+  assert.deepEqual(fs.readdirSync(locations.directory), ['自己的提示.wav']);
+  assert.ok(fs.existsSync(customSound));
+});
 
 test('fresh installations get the three real bundled WAV files without a download', t => {
   const directory = path.join(temporaryDirectory(t), '提醒音频');

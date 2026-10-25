@@ -8,6 +8,20 @@ const MIME: Record<string, string> = {
   '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.webm': 'audio/webm',
 };
 
+export function resolveReminderAudioPaths(userDataDirectory: string, documentsDirectory: string, appDirectory: string): { directory: string; sources: string[] } {
+  return {
+    // Documents is protected by Windows Controlled folder access on many PCs.
+    // Keep app-managed writes in Electron's per-user application data folder.
+    directory: path.join(userDataDirectory, 'reminder-audio'),
+    // Existing user sounds are read and copied forward once; never write back to Documents.
+    sources: [
+      path.join(documentsDirectory, '轻任务', '提醒音频'),
+      path.join(documentsDirectory, 'QQ滑出任务管家', '提醒音频'),
+      path.join(appDirectory, 'assets', 'reminder-audio'),
+    ],
+  };
+}
+
 export function reminderAudioFiles(directories: readonly string[]): string[] {
   for (const directory of directories) {
     try {
@@ -23,11 +37,16 @@ export function reminderAudioFiles(directories: readonly string[]): string[] {
 
 export function initializeReminderAudioFolder(directory: string, sources: readonly string[]): void {
   fs.mkdirSync(directory, { recursive: true });
-  // Existing custom sounds take priority; never mix defaults into a user's list.
+  // Keep a user's existing list intact. On a fresh/upgrade install, migrate
+  // the first non-empty legacy folder; otherwise seed from the bundled defaults.
   if (reminderAudioFiles([directory]).length) return;
-  for (const source of reminderAudioFiles(sources)) {
+  const initialFiles = sources.map(source => reminderAudioFiles([source])).find(files => files.length) ?? [];
+  for (const source of initialFiles) {
     // Reading first also works when the bundled file lives inside app.asar.
-    fs.writeFileSync(path.join(directory, path.basename(source)), fs.readFileSync(source), { flag: 'wx' });
+    try { fs.writeFileSync(path.join(directory, path.basename(source)), fs.readFileSync(source), { flag: 'wx' }); }
+    catch (error) {
+      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST')) throw error;
+    }
   }
 }
 

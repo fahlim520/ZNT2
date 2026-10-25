@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DockWindow } from './dock';
 import { LocalStore } from './store';
-import { initializeReminderAudioFolder, readNextReminderSound } from './reminder-audio';
+import { initializeReminderAudioFolder, readNextReminderSound, resolveReminderAudioPaths } from './reminder-audio';
 import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, parseDocuments, testConnection } from './ai';
 import { IMPORT_EXTENSIONS, IMPORT_LIMITS, type ImportedDocument } from './import-domain';
 import { normalizeInput, saveTaskRecord, toggleTaskRecord, isReminderDue, reminderSchedule, parseReminderResponse, THEMES, type ReminderSound, type Result, type Settings, type SettingsInput, type Task, type TaskInput, type Theme } from './domain';
@@ -76,16 +76,9 @@ function refreshTray() {
   ]));
 }
 
-function reminderAudioDirectory() {
-  return path.join(app.getPath('documents'), '轻任务', '提醒音频');
-}
-function reminderAudioSources() {
-  return [
-    path.join(app.getPath('documents'), 'QQ滑出任务管家', '提醒音频'),
-    path.join(app.getPath('userData'), 'reminder-audio'),
-    path.join(app.getAppPath(), 'assets', 'reminder-audio'),
-  ];
-}
+function reminderAudioPaths() { return resolveReminderAudioPaths(app.getPath('userData'), app.getPath('documents'), app.getAppPath()); }
+function reminderAudioDirectory() { return reminderAudioPaths().directory; }
+function reminderAudioSources() { return reminderAudioPaths().sources; }
 function nextReminderSound(): ReminderSound | undefined {
   const saved = store.settings();
   const next = readNextReminderSound([reminderAudioDirectory(), ...reminderAudioSources()], saved.reminderSoundIndex);
