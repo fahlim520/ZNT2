@@ -8,7 +8,7 @@
 
 **[前往 Releases 下载试用版](https://github.com/fahlim520/ZNT2/releases/latest)**
 
-- `*安装版.exe`：安装版，可选择安装目录；安装完成后自动创建桌面和开始菜单快捷方式。
+- `qing-task-*-windows-x64-setup.exe`：Windows 64 位安装版，可选择安装目录；安装完成后自动创建桌面和开始菜单快捷方式。
 - `SHA256SUMS.txt`：下载文件的 SHA-256 校验值。
 
 首次启动会展示设置。可填写**自己的 DeepSeek API Key**，点击“测试连接”后保存；也可以先跳过，用“手动添加”创建任务。程序内及安装文件的产品名称为“轻任务”。

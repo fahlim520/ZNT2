@@ -50,7 +50,7 @@
     },
     "win": {
       "target": ["nsis"],
-      "artifactName": "${productName}-${version}-${arch}-安装版.${ext}",
+      "artifactName": "qing-task-${version}-windows-${arch}-setup.${ext}",
       "signAndEditExecutable": true
     },
     "nsis": {
