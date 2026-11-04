@@ -1,12 +1,42 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { dockGeometry, normalizeInput, saveTaskRecord, toggleTaskRecord, parseReminderResponse, reminderSchedule } = require('../dist-electron/domain');
+const { dockGeometry, normalizeInput, saveTaskRecord, toggleTaskRecord, migrateDefaultReminder, isReminderDue, parseReminderResponse, reminderSchedule } = require('../dist-electron/domain');
 const { applyDateOnlySchedule, applyTaskSchedule, parseTask, parseReminderReply, repairOverriddenClockTask } = require('../dist-electron/ai');
 
 const baseNow = '2026-10-24T00:00:00.000Z';
-test('default reminder is calculated one hour before due time', () => {
+test('default reminder fires at the deadline, never one hour early', () => {
   const task = saveTaskRecord({ title: '提交报告', dueAt: '2026-10-25T09:00:00+08:00', reminderMode: 'default', category: '工作', sourceText: '明天上午9点提交报告' }, undefined, '1', baseNow);
-  assert.equal(task.reminderAt, '2026-10-25T00:00:00.000Z');
+  assert.equal(task.reminderAt, '2026-10-25T01:00:00.000Z');
+  assert.equal(isReminderDue(task, Date.parse('2026-10-25T00:00:00.000Z')), false);
+  assert.equal(isReminderDue(task, Date.parse('2026-10-25T01:00:00.000Z')), true);
+});
+test('default inputs discard stale advance times, queues and missing dates', () => {
+  const dueAt = '2026-11-05T13:00:00.000Z';
+  const clean = normalizeInput({ title: '开会', dueAt, reminderAt: '2026-11-05T12:00:00.000Z', reminderTimes: ['2026-11-05T12:00:00.000Z'] });
+  assert.equal(clean.reminderAt, dueAt);
+  assert.equal(clean.reminderTimes, undefined);
+  const undated = normalizeInput({ title: '整理文件', reminderMode: 'default', reminderAt: dueAt });
+  assert.equal(undated.reminderAt, undefined);
+});
+test('saved automatic advance reminders migrate once without changing explicit schedules', () => {
+  const dueAt = '2026-11-05T13:00:00.000Z';
+  const original = { ...saveTaskRecord({ title: '开会', dueAt }, undefined, 'legacy', baseNow), reminderAt: '2026-11-05T12:00:00.000Z', reminderShown: true, awaitingResponse: true, responseDueAt: '2026-11-05T12:05:00.000Z' };
+  const migrated = migrateDefaultReminder(original, '2026-11-05T12:01:00.000Z');
+  assert.equal(migrated.reminderAt, dueAt);
+  assert.equal(migrated.reminderShown, false);
+  assert.equal(migrated.awaitingResponse, false);
+  assert.equal(migrated.responseDueAt, undefined);
+  assert.equal(migrated.createdAt, original.createdAt);
+  assert.equal(migrated.id, original.id);
+  assert.equal(migrateDefaultReminder(migrated), migrated);
+  assert.equal(migrateDefaultReminder({ ...original, sourceType: 'file' }).reminderAt, dueAt);
+  assert.equal(original.reminderAt, '2026-11-05T12:00:00.000Z');
+  for (const changes of [{ completed: true }, { reminderMode: 'custom' }, { reminderMode: 'none' }, { dueAt: undefined }]) {
+    const untouched = { ...original, ...changes };
+    assert.equal(migrateDefaultReminder(untouched), untouched);
+  }
+  const past = migrateDefaultReminder(original, '2026-11-06T12:00:00.000Z');
+  assert.equal(isReminderDue(past, Date.parse('2026-11-06T12:00:00.000Z')), true);
 });
 test('custom and disabled reminders are preserved', () => {
   const custom = normalizeInput({ title: '开会', dueAt: '2026-10-25T09:00:00+08:00', reminderAt: '2026-10-25T08:30:00+08:00', reminderMode: 'custom' });
@@ -154,7 +184,7 @@ test('natural date and clock punctuation stays understandable', () => {
   const cases = [
     ['今天晚上9.提醒我整理电脑', '2026-10-25T13:00:00.000Z'],
     ['10.25晚上9.提醒我拉屎', '2026-10-25T13:00:00.000Z'],
-    ['今天12.30开会', '2026-10-25T03:30:00.000Z'],
+    ['今天12.30开会', '2026-10-25T04:30:00.000Z'],
     ['今天15.05提醒我整理电脑', '2026-10-25T07:05:00.000Z'],
     ['12:30提醒我吃饭', '2026-10-25T04:30:00.000Z'],
   ];
@@ -175,11 +205,12 @@ test('advance reminders, multiple clocks, relative durations and opt-outs are pr
   assert.equal(disabled.reminderMode, 'none');
   assert.equal(disabled.reminderAt, undefined);
 });
-test('explicit deadlines without a reminder instruction retain the advance default', () => {
+test('explicit deadlines without a reminder instruction remind at that exact time', () => {
   const input = normalizeInput({ title: '整理电脑', dueAt: '2026-10-24T15:05:00+08:00', reminderMode: 'default' });
   const actual = applyTaskSchedule(input, '今天15.05我要整理电脑', new Date(baseNow));
   assert.equal(actual.dueAt, input.dueAt);
   assert.equal(actual.reminderAt, input.reminderAt);
+  assert.equal(actual.reminderAt, actual.dueAt);
   assert.equal(actual.reminderMode, 'default');
 });
 test('only untouched tasks with the old override footprint are repaired', () => {

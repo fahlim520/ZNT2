@@ -8,7 +8,7 @@ import { LocalStore } from './store';
 import { initializeReminderAudioFolder, readNextReminderSound, resolveReminderAudioPaths } from './reminder-audio';
 import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, parseDocuments, parseReminderReply, testConnection } from './ai';
 import { IMPORT_EXTENSIONS, IMPORT_LIMITS, type ImportedDocument } from './import-domain';
-import { normalizeInput, saveTaskRecord, toggleTaskRecord, isReminderDue, reminderSchedule, parseReminderResponse, THEMES, type ReminderSound, type Result, type Settings, type SettingsInput, type Task, type TaskInput, type Theme } from './domain';
+import { normalizeInput, saveTaskRecord, toggleTaskRecord, migrateDefaultReminder, isReminderDue, reminderSchedule, parseReminderResponse, THEMES, type ReminderSound, type Result, type Settings, type SettingsInput, type Task, type TaskInput, type Theme } from './domain';
 
 app.setAppUserModelId('com.local.qqslidetask');
 // Tests use a separate directory and never touch real tasks or credentials.
@@ -92,6 +92,8 @@ function repairLegacyDateOnlyTasks(): Task[] {
   const now = Date.now();
   let changed = false;
   for (const task of tasks) {
+    const migrated = migrateDefaultReminder(task, new Date(now).toISOString());
+    if (migrated !== task) { Object.assign(task, migrated); changed = true; }
     if (task.sourceType === 'file') continue;
     const clockRepair = repairOverriddenClockTask(task);
     if (clockRepair) {
@@ -406,6 +408,11 @@ function registerIpc() {
 
 function boot() {
   store = new LocalStore(app.getPath('userData'));
+  // Migrate before the renderer can display an old automatic advance time.
+  const savedTasks = store.tasks();
+  const migrationTime = new Date().toISOString();
+  const migratedTasks = savedTasks.map(task => migrateDefaultReminder(task, migrationTime));
+  if (migratedTasks.some((task, index) => task !== savedTasks[index])) store.saveTasks(migratedTasks);
   try { initializeReminderAudioFolder(reminderAudioDirectory(), reminderAudioSources()); }
   catch { /* Folder access must not prevent startup or the bundled audio fallback. */ }
   const savedSettings = store.settings();

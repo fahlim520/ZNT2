@@ -28,6 +28,17 @@ test('document events keep separate explicit clocks, date-only schedules, and un
   assert.equal(result[2].needsReview, true);
 });
 
+test('imported exact deadlines use on-time defaults and preserve explicit advance reminders', () => {
+  const items = [
+    { ...entry, reminderMode: 'default', reminderAt: '2026-10-26T14:05:00+08:00' },
+    { ...entry, title: '自定义提前提醒', reminderMode: 'custom', reminderAt: '2026-10-26T14:05:00+08:00' },
+    { ...entry, title: '无需提醒', reminderMode: 'none' },
+  ];
+  const result = parseDocumentCandidates(JSON.stringify({ tasks: items }), [document], now);
+  assert.equal(result[0].task.reminderAt, result[0].task.dueAt);
+  assert.equal(result[1].task.reminderAt, '2026-10-26T06:05:00.000Z');
+  assert.equal(result[2].task.reminderAt, undefined);
+});
 test('unverifiable evidence, bad source, invented year, duplicates, and invalid dates need attention', () => {
   assert.throws(() => parseDocumentCandidates(JSON.stringify({ tasks: [{ ...entry, evidence: 'invented evidence' }] }), [document], now), /无法核对/);
   assert.throws(() => parseDocumentCandidates(JSON.stringify({ tasks: [{ ...entry, documentId: 'wrong' }] }), [document], now), /来源/);

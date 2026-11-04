@@ -112,7 +112,7 @@ export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title'
   const dueAt = isoDate(raw.dueAt, '截止时间');
   const mode = raw.reminderMode ?? 'default';
   if (!['default', 'custom', 'none'].includes(mode as string)) throw new Error('提醒方式不正确');
-  const reminderTimes = mode !== 'none' && Array.isArray(raw.reminderTimes)
+  const reminderTimes = mode === 'custom' && Array.isArray(raw.reminderTimes)
     ? [...new Set(raw.reminderTimes.map((item, index) => isoDate(item, `第 ${index + 1} 个提醒时间`)).filter((item): item is string => Boolean(item)))].sort((a, b) => Date.parse(a) - Date.parse(b))
     : undefined;
   let reminderAt: string | undefined;
@@ -120,9 +120,10 @@ export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title'
     // A custom schedule may contain several reminders. The first one is kept
     // in reminderAt for compatibility with older saved tasks, while the
     // remaining times stay in reminderTimes as a queue.
-    reminderAt = isoDate(raw.reminderAt, '提醒时间');
+    // Default means the deadline itself, even if an old model response or
+    // saved draft still contains the previous one-hour advance reminder.
+    reminderAt = mode === 'default' ? dueAt : isoDate(raw.reminderAt, '提醒时间');
     if (!reminderAt && reminderTimes?.length) reminderAt = reminderTimes[0];
-    if (!reminderAt && mode === 'default') reminderAt = new Date(Date.parse(dueAt) - 3_600_000).toISOString();
     if (!reminderAt) throw new Error('请填写提醒时间');
     if (Date.parse(reminderAt) > Date.parse(dueAt)) throw new Error('提醒时间不能晚于截止时间');
   }
@@ -137,6 +138,15 @@ export function saveTaskRecord(input: unknown, existing: Task | undefined, id: s
 export function toggleTaskRecord(task: Task, completed: boolean, now = new Date().toISOString()): Task {
   // Reopening a completed task re-arms its reminder, including missed reminders.
   return { ...task, completed, updatedAt: now, reminderShown: completed, awaitingResponse: false, responseDueAt: undefined };
+}
+export function migrateDefaultReminder(task: Task, now = new Date().toISOString()): Task {
+  // Explicit/custom schedules (including snoozes) and completed history keep
+  // their meaning. Re-arm an earlier default alert at the actual due time.
+  if (task.completed || task.reminderMode !== 'default' || !task.dueAt) return task;
+  const dueAt = isoDate(task.dueAt, '截止时间');
+  if (!dueAt || (task.reminderAt === dueAt && !task.reminderTimes?.length)) return task;
+  return { ...task, reminderAt: dueAt, reminderTimes: undefined, reminderShown: false,
+    awaitingResponse: false, responseDueAt: undefined, updatedAt: now };
 }
 export function isReminderDue(task: Task, now: number): boolean {
   return !task.completed && !task.reminderShown && !!task.reminderAt && Date.parse(task.reminderAt) <= now;
