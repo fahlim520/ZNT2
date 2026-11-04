@@ -5,6 +5,7 @@ import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DockWindow } from './dock';
 import { LocalStore } from './store';
+import { normalizeCampusProfile, readCampusProfile } from './campus-profile';
 import { initializeReminderAudioFolder, readNextReminderSound, resolveReminderAudioPaths } from './reminder-audio';
 import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, parseDocuments, parseReminderReply, testConnection } from './ai';
 import { IMPORT_EXTENSIONS, IMPORT_LIMITS, type ImportedDocument } from './import-domain';
@@ -38,7 +39,8 @@ function hasKey() { try { return Boolean(readKey()); } catch { return false; } }
 function settings(): Settings {
   const value = store.settings();
   const theme: Theme = value.theme && THEMES.includes(value.theme) ? value.theme : 'green';
-  return { hasApiKey: hasKey(), model: value.model || DEFAULT_MODEL, paused: dock?.paused ?? Boolean(value.paused), startAtLogin: app.isPackaged ? app.getLoginItemSettings().openAtLogin : false, firstRun: !value.setupDone, reminderSoundEnabled: value.reminderSoundEnabled !== false, theme };
+  const campusProfile = readCampusProfile(value.campusProfile);
+  return { campusProfile, needsCampusSetup: !campusProfile, hasApiKey: hasKey(), model: value.model || DEFAULT_MODEL, paused: dock?.paused ?? Boolean(value.paused), startAtLogin: app.isPackaged ? app.getLoginItemSettings().openAtLogin : false, firstRun: !value.setupDone, reminderSoundEnabled: value.reminderSoundEnabled !== false, theme };
 }
 function validateKey(value: unknown): string {
   if (typeof value !== 'string' || value.length > 500 || !value.trim() || /\s/.test(value.trim())) throw new Error('请输入有效的 DeepSeek API Key');
@@ -218,7 +220,10 @@ function registerIpc() {
     try { await fs.writeFile(filename, png); return await extract([filename]); }
     finally { await fs.rm(directory, { force: true, recursive: true }).catch(() => {}); }
   }));
-  handle('import:parse', async (documents: ImportedDocument[]) => {
+  handle('import:parse', async (input: { documents: ImportedDocument[]; clarification?: string }) => {
+    if (!input || typeof input !== 'object') throw new Error('导入内容格式不正确');
+    const { documents, clarification } = input;
+    if (clarification !== undefined && (typeof clarification !== 'string' || clarification.length > 2000)) throw new Error('补充说明不能超过 2000 字');
     if (parseBusy || importBusy) throw new Error('正在处理上一条请求，请稍候');
     if (!Array.isArray(documents) || !documents.length || documents.length > IMPORT_LIMITS.files) throw new Error('请先导入文件');
     let length = 0;
@@ -238,7 +243,7 @@ function registerIpc() {
     parseBusy = true;
     const controller = new AbortController(); importController = controller;
     importProgress('正在把通知整理为待办，并核对时间…');
-    try { return await parseDocuments(checked, key, store.settings().model || DEFAULT_MODEL, controller.signal); }
+    try { return await parseDocuments(checked, key, store.settings().model || DEFAULT_MODEL, controller.signal, new Date(), readCampusProfile(store.settings().campusProfile), clarification); }
     finally { parseBusy = false; if (importController === controller) importController = undefined; }
   });
   handle('import:save', (inputs: TaskInput[]) => {
@@ -346,7 +351,10 @@ function registerIpc() {
   });
   handle('settings:save', (input: SettingsInput) => {
     if (!input || typeof input !== 'object') throw new Error('设置格式不正确');
-    const value = { ...store.settings(), setupDone: true };
+    const value = { ...store.settings() };
+    // Profile onboarding is independent of API configuration for both new and existing users.
+    if (Object.keys(input).some(key => key !== 'campusProfile')) value.setupDone = true;
+    if (input.campusProfile !== undefined) value.campusProfile = input.campusProfile === null ? undefined : normalizeCampusProfile(input.campusProfile);
     if (input.apiKey !== undefined) {
       if (input.apiKey === '') value.encryptedApiKey = undefined;
       else {
@@ -384,7 +392,7 @@ function registerIpc() {
     const key = readKey();
     if (!key) throw new Error('尚未配置 DeepSeek，可先手动添加任务');
     parseBusy = true;
-    try { return await parseTask(input.trim(), key, store.settings().model || DEFAULT_MODEL); }
+    try { return await parseTask(input.trim(), key, store.settings().model || DEFAULT_MODEL, new Date(), readCampusProfile(store.settings().campusProfile)); }
     finally { parseBusy = false; }
   });
   handle('window:set-paused', (paused: unknown) => {

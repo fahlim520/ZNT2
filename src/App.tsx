@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { CATEGORIES, THEMES, THEME_LABELS, chinaDay, fromChinaInput, toChinaInput, type ReminderSound, type Result, type Settings, type Task, type TaskInput, type ReminderMode, type ResizeEdge, type Theme } from '../electron/domain';
 import ImportDialog from './ImportDialog';
+import CampusProfileDialog from './CampusProfileDialog';
 import type { ImportedDocument } from '../electron/import-domain';
 
 type Filter = 'pending' | 'today' | 'upcoming' | 'overdue' | 'done';
@@ -42,6 +43,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('deepseek-flash');
   const [startAtLogin, setStartAtLogin] = useState(false);
@@ -71,7 +73,7 @@ export default function App() {
 
   const api = window.taskDesk;
   function startImport(source: () => Promise<Result<ImportedDocument[]>>) {
-    if (importLocked.current || busy || settingsOpen || draft || reminderPrompt) return;
+    if (importLocked.current || busy || settingsOpen || profileOpen || draft || reminderPrompt) return;
     importLocked.current = true; setDragOver(false); setStatus('');
     setImportSource(source());
   }
@@ -80,7 +82,8 @@ export default function App() {
     try {
       const [allTasks, current] = await Promise.all([value(api.getTasks()), value(api.getSettings())]);
       setTasks(allTasks); setSettings(current); setModel(current.model); setStartAtLogin(current.startAtLogin); setReminderSoundEnabled(current.reminderSoundEnabled); setTheme(current.theme); setLoadFailed(false);
-      if (current.firstRun) setSettingsOpen(true);
+      if (current.needsCampusSetup) setProfileOpen(true);
+      else if (current.firstRun) setSettingsOpen(true);
     } catch (error) { setStatus(errorText(error)); setLoadFailed(true); }
     finally { setLoaded(true); }
   }
@@ -108,9 +111,9 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (!api) return;
-    api.setKeepOpen(settingsOpen || !!draft || !!deleteId || !!reminderPrompt || composerFocused || !!input.trim() || busy || reminderBusy || !!importSource || dragOver);
+    api.setKeepOpen(profileOpen || settingsOpen || !!draft || !!deleteId || !!reminderPrompt || composerFocused || !!input.trim() || busy || reminderBusy || !!importSource || dragOver);
     return () => api.setKeepOpen(false);
-  }, [settingsOpen, draft, deleteId, reminderPrompt, composerFocused, input, busy, reminderBusy, importSource, dragOver]);
+  }, [profileOpen, settingsOpen, draft, deleteId, reminderPrompt, composerFocused, input, busy, reminderBusy, importSource, dragOver]);
   useEffect(() => {
     if (!api) return;
     let depth = 0;
@@ -124,7 +127,7 @@ export default function App() {
     };
     window.addEventListener('dragenter', enter); window.addEventListener('dragover', over); window.addEventListener('dragleave', leave); window.addEventListener('drop', drop); window.addEventListener('paste', paste);
     return () => { window.removeEventListener('dragenter', enter); window.removeEventListener('dragover', over); window.removeEventListener('dragleave', leave); window.removeEventListener('drop', drop); window.removeEventListener('paste', paste); };
-  }, [busy, settingsOpen, draft, reminderPrompt]);
+  }, [busy, settingsOpen, profileOpen, draft, reminderPrompt]);
 
   function handleDragStart(event: ReactPointerEvent<HTMLElement>) {
     if (event.button !== 0) return;
@@ -272,8 +275,14 @@ export default function App() {
       setTasks(current => [...saved, ...current]); closeImport(); setFilter('pending'); setCategory('全部'); setSearch('');
       setStatus(`已导入 ${saved.length} 条待办，提醒已按预览安排。`);
     }}/>}
-    {settingsOpen && <Modal title={settings?.firstRun ? '欢迎使用轻任务' : '偏好设置'} subtitle="粘贴自己的 DeepSeek Key，即可用一句话安排任务。" onClose={() => { if (!settings?.firstRun) { setSettingsOpen(false); setApiKey(''); } else void saveSettings(); }}>
+    {profileOpen && <CampusProfileDialog profile={settings?.campusProfile} required={!!settings?.needsCampusSetup} onClose={() => setProfileOpen(false)} onSave={async campusProfile => {
+      const saved = await value(api.saveSettings({ campusProfile })); setSettings(saved); setProfileOpen(false);
+      if (saved.firstRun) setSettingsOpen(true);
+      setStatus('校园资料已保存，新任务会使用新的日期提醒偏好。');
+    }}/>}
+    {settingsOpen && !profileOpen && <Modal title={settings?.firstRun ? '欢迎使用轻任务' : '偏好设置'} subtitle="粘贴自己的 DeepSeek Key，即可用一句话安排任务。" onClose={() => { if (!settings?.firstRun) { setSettingsOpen(false); setApiKey(''); } else void saveSettings(); }}>
       <form onSubmit={event => void saveSettings(event)}>
+        <div className="campus-settings-card"><div><strong>我的校园资料</strong><p>{settings?.campusProfile ? [settings.campusProfile.stage, settings.campusProfile.major || '专业未填'].join(' · ') : '补充资料，让通知判断更有针对性'}</p><span className="field-hint">{settings?.campusProfile?.shareWithAI ? 'AI 个性化判断已开启' : '校园资料仅本地保存'}</span></div><button type="button" className="secondary" disabled={settingsBusy} onClick={() => setProfileOpen(true)}>修改资料</button></div>
         <label>DeepSeek API Key<input autoFocus type="password" autoComplete="off" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings?.hasApiKey ? '已加密保存，留空保持不变' : '在这里粘贴你的 API Key'}/></label>
         <div className="model-row"><label>模型<input value={model} onChange={event => setModel(event.target.value)} required maxLength={100}/></label><button type="button" className="secondary" disabled={settingsBusy || (!apiKey && !settings?.hasApiKey)} onClick={() => void testKey()}>{settingsBusy ? '请稍候…' : '测试连接'}</button></div>
         <label className="checkbox-label"><input type="checkbox" checked={startAtLogin} onChange={event => setStartAtLogin(event.target.checked)}/> 开机时自动启动到系统托盘</label>

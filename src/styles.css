@@ -224,3 +224,24 @@ button:disabled { cursor: default; opacity: .5; }
   .titlebar { height: 70px; padding-top: 10px; padding-bottom: 10px; }
   .overview { padding-top: 8px; padding-bottom: 8px; }
 }
+.campus-kicker { display: block; margin-bottom: 7px; color: var(--theme-primary-hover); font-size: 11px; font-weight: 700; }
+.optional { margin-left: 6px; font-size: 10px; font-weight: 400; color: #718388; }
+.campus-interests { margin: 0 0 15px; padding: 0; border: 0; }
+.campus-interests legend { margin-bottom: 10px; font-size: 12px; }
+.campus-interests > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.campus-interests button { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: #50666d; font-size: 11px; }
+.campus-interests button.selected { color: var(--theme-primary-hover); border-color: var(--theme-primary); background: var(--theme-primary-soft); }
+.campus-consent { margin-top: 18px !important; align-items: flex-start !important; line-height: 1.6; }
+.campus-actions { position: sticky; bottom: -1px; background: #fff; padding: 12px 0 2px; }
+.campus-settings-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; margin-bottom: 18px; border-radius: 10px; background: var(--theme-primary-soft); }
+.campus-settings-card > div { min-width: 0; overflow-wrap: anywhere; }
+.campus-settings-card strong { font-size: 12px; }
+.campus-settings-card p { margin: 5px 0; font-size: 11px; }
+.campus-settings-card button { flex-shrink: 0; }
+.campus-assessment { border-left: 3px solid var(--theme-primary); background: var(--theme-primary-soft); margin: 10px 0; padding: 10px; font-size: 11px; overflow-wrap: anywhere; }
+.campus-assessment p { margin: 6px 0; line-height: 1.6; }
+.campus-assessment ul { padding-left: 18px; margin: 6px 0 0; }
+.campus-assessment li { margin: 5px 0; }
+.assessment-uncertain, .assessment-unrelated { border-color: #bc8436; background: #fff8ed; }
+.import-reparse { margin: 8px 0; font-size: 11px; line-height: 1.6; }
+.import-reparse button { margin-right: 8px; }

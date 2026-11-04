@@ -35,6 +35,8 @@ export interface TaskInput {
   sourceText?: string;
 }
 export interface Settings {
+  campusProfile?: import('./campus-profile').CampusProfile;
+  needsCampusSetup: boolean;
   hasApiKey: boolean;
   model: string;
   paused: boolean;
@@ -43,14 +45,14 @@ export interface Settings {
   reminderSoundEnabled: boolean;
   theme: Theme;
 }
-export interface SettingsInput { apiKey?: string; model?: string; startAtLogin?: boolean; reminderSoundEnabled?: boolean; theme?: Theme }
+export interface SettingsInput { apiKey?: string; model?: string; startAtLogin?: boolean; reminderSoundEnabled?: boolean; theme?: Theme; campusProfile?: import('./campus-profile').CampusProfile | null }
 export interface ReminderSound { dataUrl: string; name: string; index: number; total: number }
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 export interface DesktopApi {
   chooseImportFiles(): Promise<Result<import('./import-domain').ImportedDocument[]>>;
   importDroppedFiles(files: File[]): Promise<Result<import('./import-domain').ImportedDocument[]>>;
   importClipboardImage(): Promise<Result<import('./import-domain').ImportedDocument[]>>;
-  parseImportedDocuments(documents: import('./import-domain').ImportedDocument[]): Promise<Result<import('./import-domain').ImportCandidate[]>>;
+  parseImportedDocuments(documents: import('./import-domain').ImportedDocument[], clarification?: string): Promise<Result<import('./import-domain').ImportCandidate[]>>;
   saveImportedTasks(tasks: TaskInput[]): Promise<Result<Task[]>>;
   cancelImport(): void;
   onImportProgress(handler: (progress: import('./import-domain').ImportProgress) => void): () => void;
@@ -230,7 +232,7 @@ export function parseModelTask(content: string, sourceText: string, adjustSchedu
   try { raw = JSON.parse(content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '')); } catch { throw new Error('AI 返回的任务格式不正确，请手动确认'); }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('AI 返回的任务格式不正确');
   const input = { ...raw, sourceText, reminderMode: raw.reminderMode ?? 'default' };
-  // Enforce the one-hour default locally, rather than trusting the model's arithmetic.
+  // Enforce the reminder policy locally, rather than trusting model arithmetic.
   return normalizeInput(adjustSchedule(input as unknown as TaskInput));
 }
 

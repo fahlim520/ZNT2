@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('taskDesk', {
     catch { return Promise.resolve({ ok: false, error: '无法获取文件，请使用“选择文件”入口' }); }
   },
   importClipboardImage: () => invoke('import:clipboard'),
-  parseImportedDocuments: (documents: unknown) => invoke('import:parse', documents),
+  parseImportedDocuments: (documents: unknown, clarification?: string) => invoke('import:parse', { documents, clarification }),
   saveImportedTasks: (tasks: unknown) => invoke('import:save', tasks),
   cancelImport: () => ipcRenderer.send('import:cancel'),
   onImportProgress: (handler: (progress: unknown) => void) => subscribe('import:progress', handler),
