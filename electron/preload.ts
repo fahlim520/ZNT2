@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('taskDesk', {
   getTasks: () => invoke('tasks:list'),
   saveTask: (task: unknown) => invoke('tasks:save', task),
   deleteTask: (id: string) => invoke('tasks:delete', id),
+  undoAddedTask: (id: string) => invoke('tasks:undo-added', id),
   toggleTask: (id: string, completed: boolean) => invoke('tasks:toggle', { id, completed }),
   respondReminder: (id: string, response: string) => invoke('reminder:respond', { id, response }),
   parseTask: (input: string) => invoke('ai:parse-task', input),
@@ -34,7 +35,8 @@ contextBridge.exposeInMainWorld('taskDesk', {
   hideWindow: () => ipcRenderer.send('window:hide'),
   showWindow: () => ipcRenderer.send('window:show'),
   toggleWindow: () => ipcRenderer.send('window:toggle'),
-  onReminder: (handler: (task: unknown, sound?: unknown) => void) => subscribe('reminder', handler),
+  onReminder: (handler: (tasks: unknown[], sound?: unknown) => void) => subscribe('reminders', handler),
+  onQuickEntry: (handler: () => void) => subscribe('quick-entry', handler),
   onSettings: (handler: () => void) => subscribe('open-settings', handler),
   onPaused: (handler: (paused: boolean) => void) => subscribe('paused-changed', handler),
 });

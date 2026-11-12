@@ -1,7 +1,7 @@
 // Run after npm run build: electron tests/campus-ui.cjs
 // Set CAMPUS_SMOKE_PACKAGE to a win-unpacked directory to test the actual archive.
 const { app, BrowserWindow, dialog, Notification } = require('electron');
-const fs = require('node:fs');
+require('electron').globalShortcut.register = () => true; require('electron').globalShortcut.unregister = () => {}; const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');

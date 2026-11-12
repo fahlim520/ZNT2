@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { Task, Theme } from './domain';
 
 export interface StoredSettings {
+  quickShortcut?: string;
   campusProfile?: import('./campus-profile').CampusProfile;
   encryptedApiKey?: string;
   model?: string;

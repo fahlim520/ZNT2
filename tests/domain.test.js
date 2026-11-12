@@ -53,16 +53,16 @@ test('completed tasks re-arm when reopened', () => {
   assert.equal(completed.reminderShown, true);
   assert.equal(toggleTaskRecord(completed, false, baseNow).reminderShown, false);
 });
-test('dock geometry leaves a visible handle at the top edge', () => {
+test('dock geometry retracts completely above the top edge', () => {
   const g = dockGeometry({ bounds: { x: 0, y: 0, width: 1920, height: 1080 }, workArea: { x: 0, y: 0, width: 1920, height: 1040 } });
-  assert.equal(g.x, 730); assert.equal(g.shownY, 0); assert.equal(g.hiddenY, -642); assert.equal(g.height, 650);
+  assert.equal(g.x, 730); assert.equal(g.shownY, 0); assert.equal(g.hiddenY, -650); assert.equal(g.height, 650);
 });
 test('custom dock sizes are constrained to usable screen dimensions', () => {
   const display = { bounds: { x: -1920, y: -100, width: 1920, height: 1080 }, workArea: { x: -1920, y: -100, width: 1920, height: 1040 } };
   const custom = dockGeometry(display, { width: 380, height: 510 });
   assert.equal(custom.width, 380);
   assert.equal(custom.height, 510);
-  assert.equal(custom.hiddenY + custom.height, custom.shownY + 8);
+  assert.equal(custom.hiddenY + custom.height, custom.shownY);
   const small = dockGeometry(display, { width: 100, height: -10 });
   assert.equal(small.width, 360);
   assert.equal(small.height, 480);

@@ -4,8 +4,8 @@ import { DEFAULT_DOCK_SIZE, dockGeometry, type DockSize, type ResizeEdge } from 
 const INITIAL_SHOW_GRACE_MS = 2_000;
 const OUTSIDE_HIDE_DELAY_MS = 120;
 
-// Hide all but the bottom 8px edge strip. The handle must be at the bottom of
-// the renderer, otherwise a negative window Y would hide the trigger itself.
+// The native window is hidden after retracting. Cursor polling keeps a virtual
+// top-edge trigger alive without a visible or mouse-intercepting overlay.
 export class DockWindow {
   private expanded = false;
   private targetExpanded = false;
@@ -47,21 +47,17 @@ export class DockWindow {
     const requestedX = Number.isFinite(this.preferredX) ? Math.round(this.preferredX as number) : centeredX;
     const x = Math.max(minX, Math.min(maxX, requestedX));
     const shownY = Number.isFinite(geometry.shownY) ? Math.round(geometry.shownY) : Math.round(fallback.y);
-    const hiddenY = Number.isFinite(geometry.hiddenY) ? Math.round(geometry.hiddenY) : shownY - height + 8;
+    const hiddenY = Number.isFinite(geometry.hiddenY) ? Math.round(geometry.hiddenY) : shownY - height;
     return { x, shownY, hiddenY, width, height };
   }
   start(showInitially: boolean) {
     this.reposition(showInitially);
     if (showInitially) {
-      // Keep the first launch open long enough for the user to notice the
-      // window and discover the top-edge handle. It will still return to the
-      // edge automatically after this short onboarding period.
+      // Briefly show startup; afterward the panel leaves no visible edge.
       this.startupVisibleUntil = Date.now() + INITIAL_SHOW_GRACE_MS;
       this.window.show();
       this.window.focus();
-    } else {
-      this.window.showInactive();
-    }
+    } else this.window.hide();
     this.poll = setInterval(() => this.tick(), 30);
   }
   reposition(expanded = this.targetExpanded) {
@@ -69,6 +65,7 @@ export class DockWindow {
     const g = this.geometry();
     this.expanded = this.targetExpanded = expanded;
     const y = expanded ? g.shownY : g.hiddenY;
+    if (!expanded) this.window.hide();
     if ([g.x, y, g.width, g.height].every(Number.isFinite)) {
       this.applyBounds(g, y);
     }
@@ -88,10 +85,16 @@ export class DockWindow {
   private stopAnimation() { clearInterval(this.animation); this.animation = undefined; }
   show(focus = false) {
     this.outsideSince = undefined;
+    if (!this.window.isVisible()) {
+      this.stopAnimation();
+      this.expanded = this.targetExpanded = false;
+      const g = this.geometry();
+      this.applyBounds(g, g.hiddenY);
+    }
     if (focus) { this.window.show(); this.window.focus(); } else this.window.showInactive();
     this.animate(true);
   }
-  hide() { this.endResize(); this.suppressedUntil = Date.now() + 450; this.outsideSince = undefined; this.animate(false); }
+  hide() { this.endResize(); this.endDrag(); this.suppressedUntil = Date.now() + 450; this.outsideSince = undefined; this.animate(false); }
   toggle() { if (this.targetExpanded) this.hide(); else this.show(true); }
   setKeepOpen(value: boolean) { this.keepOpen = value; this.outsideSince = undefined; }
   setPaused(value: boolean) { this.paused = value; this.outsideSince = undefined; if (value) this.show(); }
@@ -185,11 +188,12 @@ export class DockWindow {
         if ([g.x, y, g.width, g.height].every(Number.isFinite)) {
           this.applyBounds(g, y);
         }
-        if (progress >= 1) { this.stopAnimation(); this.expanded = show; }
+        if (progress >= 1) { this.stopAnimation(); this.expanded = show; if (!show) this.window.hide(); }
       } catch {
         // A display can disappear while the animation is running. Do not let
         // an Electron native coordinate conversion terminate the main process.
         this.stopAnimation();
+        if (!show && !this.window.isDestroyed()) { this.expanded = false; this.window.hide(); }
       }
     }, 16);
   }
@@ -201,8 +205,8 @@ export class DockWindow {
       if (![p.x, p.y, g.x, g.shownY, g.width, g.height].every(Number.isFinite)) return;
       if (this.resizing) { this.moveResize(); return; }
       if (this.dragging) { this.moveDrag(); return; }
-      // Only the primary display's top centre triggers; a display above it won't.
-      const trigger = p.y >= g.shownY && p.y <= g.shownY + 5 && p.x >= g.x && p.x <= g.x + g.width;
+      // Trigger only at the actual top edge across the panel's saved width.
+      const trigger = p.y >= g.shownY && p.y < g.shownY + 2 && p.x >= g.x && p.x < g.x + g.width;
       const b = this.window.getBounds();
       const inside = [b.x, b.y, b.width, b.height].every(Number.isFinite)
         && p.x >= b.x && p.x < b.x + b.width && p.y >= b.y && p.y < b.y + b.height;

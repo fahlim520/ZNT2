@@ -5,6 +5,7 @@ export type Theme = typeof THEMES[number];
 export const THEME_LABELS: Record<Theme, string> = { orange: '伊藤橙', green: '酷安绿', purple: '韵味紫', pink: '哔哩粉' };
 export type ReminderMode = 'default' | 'custom' | 'none';
 export interface Task {
+  noticeHistory?: Array<{ title: string; dueAt?: string; sourceText: string }>;
   sourceType?: 'text' | 'file';
   id: string;
   title: string;
@@ -35,6 +36,9 @@ export interface TaskInput {
   sourceText?: string;
 }
 export interface Settings {
+  quickShortcut: string;
+  quickShortcutActive: boolean;
+  quickShortcutError: string;
   campusProfile?: import('./campus-profile').CampusProfile;
   needsCampusSetup: boolean;
   hasApiKey: boolean;
@@ -45,7 +49,7 @@ export interface Settings {
   reminderSoundEnabled: boolean;
   theme: Theme;
 }
-export interface SettingsInput { apiKey?: string; model?: string; startAtLogin?: boolean; reminderSoundEnabled?: boolean; theme?: Theme; campusProfile?: import('./campus-profile').CampusProfile | null }
+export interface SettingsInput { apiKey?: string; model?: string; startAtLogin?: boolean; reminderSoundEnabled?: boolean; theme?: Theme; campusProfile?: import('./campus-profile').CampusProfile | null; quickShortcut?: string }
 export interface ReminderSound { dataUrl: string; name: string; index: number; total: number }
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 export interface DesktopApi {
@@ -53,12 +57,13 @@ export interface DesktopApi {
   importDroppedFiles(files: File[]): Promise<Result<import('./import-domain').ImportedDocument[]>>;
   importClipboardImage(): Promise<Result<import('./import-domain').ImportedDocument[]>>;
   parseImportedDocuments(documents: import('./import-domain').ImportedDocument[], clarification?: string): Promise<Result<import('./import-domain').ImportCandidate[]>>;
-  saveImportedTasks(tasks: TaskInput[]): Promise<Result<Task[]>>;
+  saveImportedTasks(tasks: import('./notice-review').ImportSaveInput[]): Promise<Result<import('./notice-review').ImportSaveResult>>;
   cancelImport(): void;
   onImportProgress(handler: (progress: import('./import-domain').ImportProgress) => void): () => void;
   getTasks(): Promise<Result<Task[]>>;
   saveTask(task: TaskInput): Promise<Result<Task>>;
   deleteTask(id: string): Promise<Result<boolean>>;
+  undoAddedTask(id: string): Promise<Result<boolean>>;
   toggleTask(id: string, completed: boolean): Promise<Result<Task>>;
   respondReminder(id: string, response: string): Promise<Result<Task>>;
   parseTask(input: string): Promise<Result<TaskInput>>;
@@ -80,7 +85,8 @@ export interface DesktopApi {
   toggleWindow(): void;
   onSettings(handler: () => void): () => void;
   onPaused(handler: (paused: boolean) => void): () => void;
-  onReminder(handler: (task: Task, sound?: ReminderSound) => void): () => void;
+  onReminder(handler: (tasks: Task[], sound?: ReminderSound) => void): () => void;
+  onQuickEntry(handler: () => void): () => void;
 }
 
 function text(value: unknown, label: string, max: number, required = false): string {
@@ -135,7 +141,7 @@ export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title'
 export function saveTaskRecord(input: unknown, existing: Task | undefined, id: string, now = new Date().toISOString()): Task {
   const clean = normalizeInput(input);
   const sameSchedule = existing && existing.reminderAt === clean.reminderAt && JSON.stringify(existing.reminderTimes || []) === JSON.stringify(clean.reminderTimes || []);
-  return { ...clean, id: existing?.id ?? id, dueAt: clean.dueAt || undefined, reminderAt: clean.reminderAt || undefined, reminderTimes: clean.reminderTimes?.length ? clean.reminderTimes : undefined, completed: existing?.completed ?? false, createdAt: existing?.createdAt ?? now, updatedAt: now, reminderShown: sameSchedule ? existing.reminderShown : false, awaitingResponse: sameSchedule ? existing.awaitingResponse : false, responseDueAt: sameSchedule ? existing.responseDueAt : undefined };
+  return { ...clean, noticeHistory: existing?.noticeHistory, id: existing?.id ?? id, dueAt: clean.dueAt || undefined, reminderAt: clean.reminderAt || undefined, reminderTimes: clean.reminderTimes?.length ? clean.reminderTimes : undefined, completed: existing?.completed ?? false, createdAt: existing?.createdAt ?? now, updatedAt: now, reminderShown: sameSchedule ? existing.reminderShown : false, awaitingResponse: sameSchedule ? existing.awaitingResponse : false, responseDueAt: sameSchedule ? existing.responseDueAt : undefined };
 }
 export function toggleTaskRecord(task: Task, completed: boolean, now = new Date().toISOString()): Task {
   // Reopening a completed task re-arms its reminder, including missed reminders.
@@ -254,6 +260,6 @@ export function dockGeometry(display: { bounds: { x: number; y: number; width: n
   const width = Math.min(display.workArea.width, Math.max(MIN_DOCK_SIZE.width, Number.isFinite(size.width) ? Math.round(size.width!) : DEFAULT_DOCK_SIZE.width));
   const height = Math.min(display.workArea.height, Math.max(MIN_DOCK_SIZE.height, Number.isFinite(size.height) ? Math.round(size.height!) : DEFAULT_DOCK_SIZE.height));
   const shownY = display.bounds.y;
-  // Keep only a slim 8px edge visible while the panel is retracted.
-  return { x: Math.round(display.workArea.x + (display.workArea.width - width) / 2), shownY, hiddenY: shownY - height + 8, width, height };
+  // No visible strip: native hide() finishes the slide, even if Windows clamps Y.
+  return { x: Math.round(display.workArea.x + (display.workArea.width - width) / 2), shownY, hiddenY: shownY - height, width, height };
 }

@@ -1,11 +1,12 @@
-import { CATEGORIES, chinaDay, normalizeInput, type TaskInput } from './domain';
+import { CATEGORIES, chinaDay, normalizeInput, type TaskInput, type Task } from './domain';
 import { campusAIContext, type CampusProfile } from './campus-profile';
+import { resolveNoticeMatch, type NoticeMatch } from './notice-review';
 
 export const IMPORT_EXTENSIONS = ['pdf', 'docx', 'doc', 'png', 'jpg', 'jpeg', 'bmp', 'webp', 'txt', 'md', 'csv'];
 export const IMPORT_LIMITS = { files: 8, fileBytes: 20 * 1024 * 1024, pages: 20, text: 50_000, tasks: 40 };
 export interface ImportedDocument { id: string; name: string; text: string; warnings: string[]; error?: string }
 export interface CampusAssessment { status: 'related' | 'uncertain' | 'unrelated' | 'general'; reason: string; questions: string[]; audienceEvidence: string }
-export interface ImportCandidate { id: string; documentId: string; task: TaskInput; evidence: string; warnings: string[]; needsReview: boolean; assessment?: CampusAssessment }
+export interface ImportCandidate { id: string; documentId: string; task: TaskInput; evidence: string; warnings: string[]; needsReview: boolean; assessment?: CampusAssessment; match?: NoticeMatch }
 export interface ImportProgress { message: string }
 
 function compact(value: string) { return value.replace(/\s+/g, ''); }
@@ -37,7 +38,7 @@ export function dateOnlyImportSchedule(day: string, now = Date.now(), profile?: 
   return { dueAt: new Date(end).toISOString(), reminderMode: reminders.length ? 'custom' : 'none', reminderAt: reminders[0], reminderTimes: reminders.slice(1) };
 }
 
-export function parseDocumentCandidates(content: string, documents: ImportedDocument[], now = Date.now(), profile?: CampusProfile, clarification = ''): ImportCandidate[] {
+export function parseDocumentCandidates(content: string, documents: ImportedDocument[], now = Date.now(), profile?: CampusProfile, clarification = '', existingTasks: Task[] = []): ImportCandidate[] {
   let raw: any;
   try { raw = JSON.parse(content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '')); }
   catch { throw new Error('AI 返回的格式不正确，识别原文已保留，请重试或手动整理'); }
@@ -89,6 +90,8 @@ export function parseDocumentCandidates(content: string, documents: ImportedDocu
     const key = `${compact(task.title)}|${task.dueAt || ''}`;
     const duplicate = seen.has(key); seen.add(key);
     if (duplicate) warnings.push('本次导入中可能存在重复任务，请核对后再勾选。');
-    return { id: `candidate-${index}`, documentId: document.id, task, evidence, warnings, assessment, needsReview: ambiguous || duplicate || assessment?.status === 'uncertain' || assessment?.status === 'unrelated' || warnings.some(item => /已经过去|无效/.test(item)) };
+    const match = resolveNoticeMatch(task, entry.match, existingTasks, document);
+    if (entry.match?.kind && entry.match.kind !== 'none' && !match) warnings.push('疑似关联已有事项，但关联依据不足，请核对后再添加。');
+    return { id: `candidate-${index}`, documentId: document.id, task, evidence, warnings, assessment, match, needsReview: !!match || ambiguous || duplicate || assessment?.status === 'uncertain' || assessment?.status === 'unrelated' || warnings.some(item => /已经过去|无效|关联依据不足/.test(item)) };
   });
 }

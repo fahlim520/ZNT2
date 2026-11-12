@@ -12,6 +12,7 @@ function fixture(initialSize = {}, initialX = 500, onSizeChange = () => {}, show
   let now = 1000;
   const intervals = new Set();
   const window = {
+    visible: false,
     bounds: { x: initialX, y: 0, width: 460, height: 650 },
     min: [0, 0], max: [0, 0],
     isDestroyed: () => false,
@@ -25,7 +26,8 @@ function fixture(initialSize = {}, initialX = 500, onSizeChange = () => {}, show
         height: Math.min(this.max[1] || Infinity, Math.max(this.min[1], bounds.height)),
       };
     },
-    show() {}, showInactive() {}, focus() {},
+    show() { this.visible = true; }, showInactive() { this.visible = true; }, focus() {},
+    hide() { this.visible = false; }, isVisible() { return this.visible; },
   };
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../dist-electron/dock.js'), 'utf8'), {
@@ -45,13 +47,58 @@ function fixture(initialSize = {}, initialX = 500, onSizeChange = () => {}, show
   };
 }
 
+test('fully hidden window opens at the saved top edge, with no visible trigger window', () => {
+  const { dock, window, cursor, advance } = fixture({ width: 390, height: 510 }, 700);
+  assert.equal(window.visible, false);
+  assert.equal(window.bounds.y + window.bounds.height, 0);
+  cursor.x = 699; cursor.y = 0; advance(200);
+  assert.equal(window.visible, false);
+  cursor.x = 800; cursor.y = 3; advance(200);
+  assert.equal(window.visible, false);
+  cursor.y = -1; advance(200);
+  assert.equal(window.visible, false);
+  cursor.y = 0; advance(30); advance(200);
+  assert.equal(window.visible, true); assert.equal(window.bounds.y, 0);
+  dock.hide(); advance(120);
+  assert.equal(window.visible, false);
+  advance(100); assert.equal(window.visible, false); // Click-hide suppression.
+  advance(400); advance(200); assert.equal(window.visible, true);
+  assert.equal(window.bounds.width, 390);
+  dock.dispose();
+});
+
+test('native hide removes every pixel even if Windows clamps negative window coordinates', () => {
+  const { dock, window, advance } = fixture({}, 500, () => {}, true);
+  const setBounds = window.setBounds.bind(window);
+  window.setBounds = bounds => setBounds({ ...bounds, y: Math.max(-640, bounds.y) });
+  dock.hide(); advance(120);
+  assert.equal(window.visible, false);
+  assert.ok(window.bounds.y + window.bounds.height > 0); // Native visibility wins.
+  dock.show(true); advance(200);
+  assert.equal(window.visible, true); assert.equal(window.bounds.y, 0);
+  dock.dispose();
+});
+
+test('show during retract and monitor reposition cannot leave a stranded visible sliver', () => {
+  const { dock, window, cursor, advance, display } = fixture({}, 500, () => {}, true);
+  dock.hide(); advance(50); dock.show(); advance(200);
+  assert.equal(window.visible, true); assert.equal(window.bounds.y, 0);
+  dock.hide(); advance(120);
+  display.bounds.y = -100; display.workArea.y = -100;
+  dock.reposition(); assert.equal(window.visible, false);
+  cursor.x = 600; cursor.y = -100; advance(500); advance(200);
+  assert.equal(window.visible, true); assert.equal(window.bounds.y, -100);
+  dock.dispose();
+});
+
 test('initial visibility grace is short and then auto-hides when the pointer is outside', () => {
   const { dock, window, advance } = fixture({}, 500, () => {}, true);
   advance(2100);
   assert.equal(window.bounds.y, 0);
   advance(120);
   advance(120);
-  assert.equal(window.bounds.y, -642);
+  assert.equal(window.bounds.y, -650);
+  assert.equal(window.visible, false);
   dock.dispose();
 });
 
@@ -66,7 +113,8 @@ test('a stale keep-open flag cannot block auto-hide after the window loses focus
   advance(120);
   advance(120);
   advance(120);
-  assert.equal(window.bounds.y, -642);
+  assert.equal(window.bounds.y, -650);
+  assert.equal(window.visible, false);
   dock.dispose();
 });
 
@@ -86,7 +134,8 @@ test('corner resizing changes both dimensions and hidden geometry follows the ne
   assert.equal(saved[0].width, 410);
   assert.equal(saved[0].height, 550);
   dock.reposition(false);
-  assert.equal(window.bounds.y, -542);
+  assert.equal(window.bounds.y, -550);
+  assert.equal(window.visible, false);
   dock.dispose();
 });
 

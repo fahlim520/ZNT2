@@ -1,15 +1,19 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, Notification, powerMonitor, screen, shell, Tray, Menu, safeStorage, utilityProcess, type IpcMainInvokeEvent, type IpcMainEvent } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, Notification, powerMonitor, screen, shell, Tray, Menu, safeStorage, utilityProcess, type IpcMainInvokeEvent, type IpcMainEvent } from 'electron';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DockWindow } from './dock';
+import { collectDueReminders } from './reminder-delivery';
+import { DEFAULT_QUICK_SHORTCUT, QuickShortcut } from './quick-shortcut';
+import { undoableTaskVersion } from './task-feedback';
 import { LocalStore } from './store';
 import { normalizeCampusProfile, readCampusProfile } from './campus-profile';
 import { initializeReminderAudioFolder, readNextReminderSound, resolveReminderAudioPaths } from './reminder-audio';
 import { DEFAULT_MODEL, applyDateOnlySchedule, repairOverriddenClockTask, parseTask, parseDocuments, parseReminderReply, testConnection } from './ai';
-import { IMPORT_EXTENSIONS, IMPORT_LIMITS, type ImportedDocument } from './import-domain';
-import { normalizeInput, saveTaskRecord, toggleTaskRecord, migrateDefaultReminder, isReminderDue, reminderSchedule, parseReminderResponse, THEMES, type ReminderSound, type Result, type Settings, type SettingsInput, type Task, type TaskInput, type Theme } from './domain';
+import { IMPORT_EXTENSIONS, IMPORT_LIMITS, type ImportedDocument, type ImportCandidate } from './import-domain';
+import { prepareImportSave, type ImportSaveInput } from './notice-review';
+import { normalizeInput, saveTaskRecord, toggleTaskRecord, migrateDefaultReminder, reminderSchedule, parseReminderResponse, THEMES, type ReminderSound, type Result, type Settings, type SettingsInput, type Task, type TaskInput, type Theme } from './domain';
 
 app.setAppUserModelId('com.local.qqslidetask');
 // Tests use a separate directory and never touch real tasks or credentials.
@@ -25,8 +29,11 @@ let importBusy = false;
 let importWorker: Electron.UtilityProcess | undefined;
 let importController: AbortController | undefined;
 let importedDocuments: ImportedDocument[] = [];
+let importCandidates: ImportCandidate[] = [];
 let notificationErrorShown = false;
 const activeNotifications = new Set<Notification>();
+let quickShortcut: QuickShortcut;
+const undoableAdds = new Map<string, { version: string; expires: number }>();
 
 function readKey() {
   const encrypted = store.settings().encryptedApiKey;
@@ -40,7 +47,7 @@ function settings(): Settings {
   const value = store.settings();
   const theme: Theme = value.theme && THEMES.includes(value.theme) ? value.theme : 'green';
   const campusProfile = readCampusProfile(value.campusProfile);
-  return { campusProfile, needsCampusSetup: !campusProfile, hasApiKey: hasKey(), model: value.model || DEFAULT_MODEL, paused: dock?.paused ?? Boolean(value.paused), startAtLogin: app.isPackaged ? app.getLoginItemSettings().openAtLogin : false, firstRun: !value.setupDone, reminderSoundEnabled: value.reminderSoundEnabled !== false, theme };
+  return { quickShortcut: value.quickShortcut ?? DEFAULT_QUICK_SHORTCUT, quickShortcutActive: !!quickShortcut?.active, quickShortcutError: quickShortcut?.error || '', campusProfile, needsCampusSetup: !campusProfile, hasApiKey: hasKey(), model: value.model || DEFAULT_MODEL, paused: dock?.paused ?? Boolean(value.paused), startAtLogin: app.isPackaged ? app.getLoginItemSettings().openAtLogin : false, firstRun: !value.setupDone, reminderSoundEnabled: value.reminderSoundEnabled !== false, theme };
 }
 function validateKey(value: unknown): string {
   if (typeof value !== 'string' || value.length > 500 || !value.trim() || /\s/.test(value.trim())) throw new Error('请输入有效的 DeepSeek API Key');
@@ -115,55 +122,28 @@ function repairLegacyDateOnlyTasks(): Task[] {
 
 function checkReminders() {
   try {
-    const before = store.tasks();
-    const tasks = repairLegacyDateOnlyTasks();
-    const now = Date.now();
-    let changed = tasks.some((task, index) => JSON.stringify(task) !== JSON.stringify(before[index]));
-    for (const task of tasks) {
-      if (task.completed) continue;
-
-      // A reminder waits for a reply for five minutes. If the user did not
-      // reply, repeat it. When a queued future reminder has also become due,
-      // advance to that time so date-only tasks can remind across days.
-      if (task.awaitingResponse && task.responseDueAt && Date.parse(task.responseDueAt) <= now) {
-        const currentAt = task.reminderAt ? Date.parse(task.reminderAt) : Number.POSITIVE_INFINITY;
-        const next = reminderSchedule(task).find(item => Date.parse(item) > currentAt && Date.parse(item) <= now);
-        if (next) {
-          task.reminderAt = next;
-          task.reminderTimes = reminderSchedule(task).filter(item => Date.parse(item) > Date.parse(next));
-          if (!task.reminderTimes.length) task.reminderTimes = undefined;
-        }
-        task.reminderShown = false;
-        task.awaitingResponse = false;
-        task.responseDueAt = undefined;
-        task.updatedAt = new Date(now).toISOString();
-        changed = true;
-      }
-
-      if (!isReminderDue(task, now)) continue;
-      task.reminderShown = true;
-      task.awaitingResponse = true;
-      task.responseDueAt = new Date(now + 5 * 60_000).toISOString();
-      task.updatedAt = new Date(now).toISOString();
-      changed = true;
-      const snapshot = { ...task };
-      const sound = store.settings().reminderSoundEnabled === false ? undefined : nextReminderSound();
-      dock.show(true);
-      window.webContents.send('reminder', snapshot, sound);
-
-      if (Notification.isSupported()) {
-        const notification = new Notification({ title: '轻任务 · 该行动啦', body: `${task.title}（可用自然语言回复“已完成”或说明何时再提醒）`, silent: true });
-        activeNotifications.add(notification);
-        notification.on('click', () => { dock.show(true); window.webContents.send('reminder', snapshot); activeNotifications.delete(notification); });
-        notification.on('close', () => activeNotifications.delete(notification));
-        notification.on('failed', () => {
-          activeNotifications.delete(notification);
-          window.webContents.send('reminder', { ...snapshot, notes: 'Windows 未能显示通知，请检查系统通知设置。' });
-        });
-        notification.show();
-      }
-    }
+    const { tasks, due, changed } = collectDueReminders(repairLegacyDateOnlyTasks(), Date.now());
+    // Persist first so a fast reply cannot be overwritten by this batch.
     if (changed) store.saveTasks(tasks);
+    if (!due.length) return;
+    let sound: ReminderSound | undefined;
+    try { if (store.settings().reminderSoundEnabled !== false) sound = nextReminderSound(); } catch { /* Text reminders still work when audio is unavailable. */ }
+    dock.show(true);
+    window.webContents.send('reminders', due, sound);
+    if (Notification.isSupported()) {
+      const ids = new Set(due.map(task => task.id));
+      const notification = new Notification({ title: '轻任务 · 该行动啦', body: due.length === 1 ? due[0].title : `${due.length} 条待办到时间了：${due[0].title} 等`, silent: true });
+      activeNotifications.add(notification);
+      notification.on('click', () => {
+        const pending = store.tasks().filter(task => ids.has(task.id) && !task.completed && task.awaitingResponse);
+        dock.show(true);
+        if (pending.length) window.webContents.send('reminders', pending);
+        activeNotifications.delete(notification);
+      });
+      notification.on('close', () => activeNotifications.delete(notification));
+      notification.on('failed', () => activeNotifications.delete(notification));
+      notification.show();
+    }
   } catch (error) {
     if (!notificationErrorShown) { notificationErrorShown = true; dialog.showErrorBox('提醒检查失败', error instanceof Error ? error.message : String(error)); }
   }
@@ -172,6 +152,7 @@ function checkReminders() {
 function registerIpc() {
   const importProgress = (message: string) => { if (!window.isDestroyed()) window.webContents.send('import:progress', { message }); };
   const extract = async (paths: string[]) => {
+    importedDocuments = []; importCandidates = [];
     const resources = app.isPackaged ? path.join(process.resourcesPath, 'import-resources') : path.join(app.getAppPath(), 'electron', 'resources');
     const controller = new AbortController(); importController = controller;
     try {
@@ -241,28 +222,30 @@ function registerIpc() {
     const key = readKey();
     if (!key) throw new Error('尚未配置 DeepSeek，可以根据识别原文手动创建任务');
     parseBusy = true;
+    importCandidates = [];
     const controller = new AbortController(); importController = controller;
     importProgress('正在把通知整理为待办，并核对时间…');
-    try { return await parseDocuments(checked, key, store.settings().model || DEFAULT_MODEL, controller.signal, new Date(), readCampusProfile(store.settings().campusProfile), clarification); }
+    try {
+      const candidates = await parseDocuments(checked, key, store.settings().model || DEFAULT_MODEL, controller.signal, new Date(), readCampusProfile(store.settings().campusProfile), clarification, store.tasks());
+      if (controller.signal.aborted) throw new Error('已取消整理');
+      importCandidates = candidates;
+      return candidates;
+    }
     finally { parseBusy = false; if (importController === controller) importController = undefined; }
   });
-  handle('import:save', (inputs: TaskInput[]) => {
-    if (!Array.isArray(inputs) || !inputs.length || inputs.length > IMPORT_LIMITS.tasks) throw new Error('请选择 1–40 条任务');
-    // Validate the entire batch before writing so a bad final task cannot leave
-    // a partly imported list. File candidates always create new task IDs.
-    const now = new Date().toISOString();
-    const tasks = inputs.map(input => {
-      if (!input || input.id) throw new Error('导入任务格式不正确');
-      return saveTaskRecord({ ...input, sourceType: 'file' }, undefined, randomUUID(), now);
-    });
-    store.saveTasks([...tasks, ...store.tasks()]);
-    importedDocuments = [];
+  handle('import:save', (inputs: ImportSaveInput[]) => {
+    if (importBusy || parseBusy) throw new Error('请等待通知整理完成');
+    // Re-read before the atomic write. User edits during the AI request cannot
+    // be overwritten by the old preview snapshot.
+    const { allTasks, result } = prepareImportSave(inputs, importCandidates, store.tasks(), new Date().toISOString(), randomUUID);
+    if (result.created || result.updated) store.saveTasks(allTasks);
+    importedDocuments = []; importCandidates = [];
     setTimeout(checkReminders, 250);
-    return tasks;
+    return result;
   });
   ipcMain.on('import:cancel', event => {
     if (!trusted(event)) return;
-    importController?.abort(); importedDocuments = [];
+    importController?.abort(); importedDocuments = []; importCandidates = [];
   });
   handle('tasks:list', () => repairLegacyDateOnlyTasks());
   handle('tasks:save', (input: TaskInput) => {
@@ -272,12 +255,26 @@ function registerIpc() {
     if (clean.id && !existing) throw new Error('任务已不存在，请刷新后重试');
     const task = saveTaskRecord(clean, existing, randomUUID());
     store.saveTasks(existing ? tasks.map(item => item.id === task.id ? task : item) : [task, ...tasks]);
+    for (const [id, token] of undoableAdds) if (token.expires < Date.now()) undoableAdds.delete(id);
+    if (!existing) undoableAdds.set(task.id, { version: undoableTaskVersion(task), expires: Date.now() + 30_000 });
+    else undoableAdds.delete(task.id);
     setTimeout(checkReminders, 250);
     return task;
+  });
+  handle('tasks:undo-added', (id: unknown) => {
+    if (typeof id !== 'string') throw new Error('任务编号不正确');
+    const token = undoableAdds.get(id);
+    const tasks = store.tasks();
+    const task = tasks.find(item => item.id === id);
+    if (!token || token.expires < Date.now() || !task || token.version !== undoableTaskVersion(task)) throw new Error('这条任务已修改或撤销时间已过，请在列表中操作');
+    store.saveTasks(tasks.filter(item => item.id !== id));
+    undoableAdds.delete(id);
+    return true;
   });
   handle('tasks:delete', (id: unknown) => {
     if (typeof id !== 'string' || id.length > 100) throw new Error('任务编号不正确');
     store.saveTasks(store.tasks().filter(item => item.id !== id));
+    undoableAdds.delete(id);
     return true;
   });
   handle('tasks:toggle', (input: { id: string; completed: boolean }) => {
@@ -287,6 +284,7 @@ function registerIpc() {
     if (!task) throw new Error('任务已不存在');
     const updated = toggleTaskRecord(task, input.completed);
     store.saveTasks(tasks.map(item => item.id === updated.id ? updated : item));
+    undoableAdds.delete(updated.id);
     setTimeout(checkReminders, 250);
     return updated;
   });
@@ -319,7 +317,7 @@ function registerIpc() {
     const currentTask = latestTasks.find(item => item.id === input.id);
     if (!currentTask) throw new Error('任务已不存在');
     if (currentTask.completed) return currentTask;
-    if (currentTask.updatedAt !== task.updatedAt) throw new Error('任务刚刚有更新，请查看最新内容后重新回复。');
+    if (undoableTaskVersion(currentTask) !== undoableTaskVersion(task)) throw new Error('任务刚刚有更新，请查看最新内容后重新回复。');
     let updated: Task;
     if (response.type === 'complete') {
       updated = toggleTaskRecord(currentTask, true);
@@ -338,6 +336,7 @@ function registerIpc() {
       };
     }
     store.saveTasks(latestTasks.map(item => item.id === updated.id ? updated : item));
+    undoableAdds.delete(updated.id);
     setTimeout(checkReminders, 250);
     return updated;
   });
@@ -366,7 +365,6 @@ function registerIpc() {
     if (input.model !== undefined) value.model = validateModel(input.model);
     if (input.startAtLogin !== undefined) {
       if (typeof input.startAtLogin !== 'boolean') throw new Error('启动选项不正确');
-      if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: input.startAtLogin, path: process.execPath, args: ['--startup'] });
       value.startAtLogin = input.startAtLogin;
     }
     if (input.reminderSoundEnabled !== undefined) {
@@ -377,7 +375,9 @@ function registerIpc() {
       if (typeof input.theme !== 'string' || !THEMES.includes(input.theme as Theme)) throw new Error('主题颜色不正确');
       value.theme = input.theme as Theme;
     }
-    store.saveSettings(value);
+    if (input.quickShortcut !== undefined) quickShortcut.change(input.quickShortcut, key => store.saveSettings({ ...value, quickShortcut: key }));
+    else store.saveSettings(value);
+    if (input.startAtLogin !== undefined && app.isPackaged) app.setLoginItemSettings({ openAtLogin: input.startAtLogin, path: process.execPath, args: ['--startup'] });
     return settings();
   });
   handle('ai:test-key', async (input: { apiKey?: string; model?: string }) => {
@@ -446,6 +446,12 @@ function boot() {
     catch (error) { dialog.showErrorBox('窗口尺寸保存失败', error instanceof Error ? error.message : String(error)); }
   });
   dock.paused = Boolean(savedSettings.paused);
+  quickShortcut = new QuickShortcut(globalShortcut, () => {
+    dock.show(true);
+    const send = () => { if (!window.isDestroyed()) window.webContents.send('quick-entry'); };
+    if (window.webContents.isLoading()) window.webContents.once('did-finish-load', send); else send();
+  });
+  quickShortcut.start(savedSettings.quickShortcut ?? DEFAULT_QUICK_SHORTCUT);
   window.removeMenu();
   window.setAlwaysOnTop(true, 'floating');
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -480,5 +486,5 @@ else {
   app.on('second-instance', () => dock?.show(true));
   app.on('activate', () => dock?.show(true));
   app.on('window-all-closed', () => { /* Keep the tray app alive. */ });
-  app.on('before-quit', () => { quitting = true; importController?.abort(); importWorker?.kill(); clearInterval(reminderTimer); dock?.dispose(); tray?.destroy(); });
+  app.on('before-quit', () => { quitting = true; quickShortcut?.dispose(); importController?.abort(); importWorker?.kill(); clearInterval(reminderTimer); dock?.dispose(); tray?.destroy(); });
 }

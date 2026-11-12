@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { CATEGORIES, THEMES, THEME_LABELS, chinaDay, fromChinaInput, toChinaInput, type ReminderSound, type Result, type Settings, type Task, type TaskInput, type ReminderMode, type ResizeEdge, type Theme } from '../electron/domain';
 import ImportDialog from './ImportDialog';
 import CampusProfileDialog from './CampusProfileDialog';
 import type { ImportedDocument } from '../electron/import-domain';
+import { emptyReminderQueue, reminderQueueReducer } from '../electron/reminder-delivery';
+import { taskFeedback } from '../electron/task-feedback';
+import { DEFAULT_QUICK_SHORTCUT } from '../electron/quick-shortcut';
 
 type Filter = 'pending' | 'today' | 'upcoming' | 'overdue' | 'done';
 type Draft = { id?: string; sourceType?: 'text' | 'file'; title: string; dueAt: string; reminderAt: string; reminderTimes?: string[]; reminderMode: ReminderMode; category: Task['category']; notes: string; sourceText: string };
@@ -30,7 +33,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] || paths.check}</svg>;
 }
 function Modal({ title, subtitle, children, onClose }: { title: string; subtitle: string; children: ReactNode; onClose: () => void }) {
-  return <div className="modal-backdrop" onKeyDown={event => { if (event.key === 'Escape') onClose(); }}><section role="dialog" aria-modal="true" aria-label={title} className="modal"><header className="modal-head"><div><h2>{title}</h2><p>{subtitle}</p></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭对话框"><Icon name="close"/></button></header>{children}</section></div>;
+  return <div className="modal-backdrop" onKeyDown={event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); event.stopPropagation(); onClose(); } }}><section role="dialog" aria-modal="true" aria-label={title} className="modal"><header className="modal-head"><div><h2>{title}</h2><p>{subtitle}</p></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭对话框"><Icon name="close"/></button></header>{children}</section></div>;
 }
 
 export default function App() {
@@ -48,6 +51,7 @@ export default function App() {
   const [model, setModel] = useState('deepseek-flash');
   const [startAtLogin, setStartAtLogin] = useState(false);
   const [reminderSoundEnabled, setReminderSoundEnabled] = useState(true);
+  const [shortcut, setShortcut] = useState(DEFAULT_QUICK_SHORTCUT);
   const [theme, setTheme] = useState<Theme>('green');
   const [settingsStatus, setSettingsStatus] = useState('');
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -57,17 +61,20 @@ export default function App() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [composerFocused, setComposerFocused] = useState(false);
-  const [reminderPrompt, setReminderPrompt] = useState<Task | null>(null);
-  const [reminderReply, setReminderReply] = useState('');
+  const [reminders, dispatchReminder] = useReducer(reminderQueueReducer, emptyReminderQueue);
   const [reminderBusy, setReminderBusy] = useState(false);
   const [reminderError, setReminderError] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [importSource, setImportSource] = useState<Promise<Result<ImportedDocument[]>> | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [addedTask, setAddedTask] = useState<Task | null>(null);
+  const [undoBusy, setUndoBusy] = useState(false);
+  const composer = useRef<HTMLTextAreaElement>(null);
+  const reminderPrompt = !draft && !deleteId && !settingsOpen && !profileOpen && !importSource ? reminders.tasks[0] ?? null : null;
+  const reminderReply = reminderPrompt ? reminders.replies[reminderPrompt.id] || '' : '';
   const importLocked = useRef(false);
   const dragStart = useRef<{ pointerId: number; x: number; y: number } | null>(null);
-  const dragMoved = useRef(false);
   const resizePointer = useRef<number | null>(null);
   const reminderAudio = useRef<HTMLAudioElement | null>(null);
 
@@ -81,7 +88,8 @@ export default function App() {
   async function load() {
     try {
       const [allTasks, current] = await Promise.all([value(api.getTasks()), value(api.getSettings())]);
-      setTasks(allTasks); setSettings(current); setModel(current.model); setStartAtLogin(current.startAtLogin); setReminderSoundEnabled(current.reminderSoundEnabled); setTheme(current.theme); setLoadFailed(false);
+      setTasks(allTasks); setSettings(current); setModel(current.model); setStartAtLogin(current.startAtLogin); setReminderSoundEnabled(current.reminderSoundEnabled); setTheme(current.theme); setShortcut(current.quickShortcut); setLoadFailed(false);
+      dispatchReminder({ type: 'receive', tasks: allTasks.filter(task => task.awaitingResponse && !task.completed).sort((a, b) => Date.parse(a.reminderAt!) - Date.parse(b.reminderAt!)) });
       if (current.needsCampusSetup) setProfileOpen(true);
       else if (current.firstRun) setSettingsOpen(true);
     } catch (error) { setStatus(errorText(error)); setLoadFailed(true); }
@@ -90,24 +98,45 @@ export default function App() {
   useEffect(() => {
     if (!api) return;
     void load();
-    const offReminder = api.onReminder((task, sound?: ReminderSound) => {
-      setTasks(current => current.some(item => item.id === task.id) ? current.map(item => item.id === task.id ? task : item) : [task, ...current]);
-      setReminderPrompt(task);
-      setReminderReply('');
-      setReminderError('');
+    const offReminder = api.onReminder((batch, sound?: ReminderSound) => {
+      if (!batch.length) return;
+      setTasks(current => [...batch, ...current.filter(item => !batch.some(task => task.id === item.id))]);
+      dispatchReminder({ type: 'receive', tasks: batch });
       if (sound?.dataUrl) {
         reminderAudio.current?.pause();
         const audio = new Audio(sound.dataUrl);
         audio.volume = 1;
         reminderAudio.current = audio;
-        void audio.play().catch(() => setStatus(`任务提醒 · ${task.title}（提示音播放失败，请检查系统音量）`));
+        void audio.play().catch(() => setStatus('提醒提示音播放失败，请检查系统音量'));
       }
-      setStatus(`任务提醒 · ${task.title}${sound ? ` · 播放 ${sound.name}` : ''}${task.notes?.startsWith('Windows') ? ` · ${task.notes}` : ''}`);
+      setStatus(`有 ${batch.length} 条待办到时间了，已排队提醒。`);
     });
     const offSettings = api.onSettings(() => { setApiKey(''); setSettingsStatus(''); setSettingsOpen(true); });
     const offPaused = api.onPaused(paused => setSettings(current => current ? { ...current, paused } : current));
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => { offReminder(); offSettings(); offPaused(); clearInterval(timer); };
+  }, []);
+  useEffect(() => { setReminderError(''); }, [reminderPrompt?.id]);
+  useEffect(() => () => reminderAudio.current?.pause(), []);
+  useEffect(() => {
+    if (!addedTask) return;
+    const timer = setTimeout(() => setAddedTask(null), 15_000);
+    return () => clearTimeout(timer);
+  }, [addedTask]);
+  useEffect(() => {
+    if (!api) return;
+    return api.onQuickEntry(() => {
+      if (!document.querySelector('[role=dialog]')) composer.current?.focus();
+    });
+  }, []);
+  useEffect(() => {
+    if (!api) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.isComposing || event.keyCode === 229 || event.defaultPrevented || document.querySelector('[role=dialog]')) return;
+      event.preventDefault(); composer.current?.blur(); api.hideWindow();
+    };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
   }, []);
   useEffect(() => {
     if (!api) return;
@@ -133,14 +162,12 @@ export default function App() {
     if (event.button !== 0) return;
     if ((event.target as HTMLElement).closest('button, input, textarea, select, a')) return;
     dragStart.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-    dragMoved.current = false;
     event.currentTarget.setPointerCapture(event.pointerId);
     api.startDragWindow();
   }
   function handleDragMove(event: ReactPointerEvent<HTMLElement>) {
     const start = dragStart.current;
     if (!start || start.pointerId !== event.pointerId) return;
-    if (Math.abs(event.clientX - start.x) > 4 || Math.abs(event.clientY - start.y) > 4) dragMoved.current = true;
     api.moveDragWindow();
   }
   function handleDragEnd(event: ReactPointerEvent<HTMLElement>) {
@@ -148,10 +175,6 @@ export default function App() {
     api.endDragWindow();
     try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* Pointer capture may already be released. */ }
     dragStart.current = null;
-  }
-  function handleHandleClick(event: React.MouseEvent<HTMLButtonElement>) {
-    if (dragMoved.current) { event.preventDefault(); event.stopPropagation(); dragMoved.current = false; return; }
-    api.toggleWindow();
   }
   function handleResizeStart(event: ReactPointerEvent<HTMLElement>, edge: ResizeEdge) {
     if (event.button !== 0) return;
@@ -189,8 +212,8 @@ export default function App() {
     try {
       const parsed = await value(api.parseTask(source));
       const saved = await value(api.saveTask(parsed));
-      setTasks(current => [saved, ...current]); setInput(''); setFilter('pending'); setCategory('全部'); setSearch('');
-      setStatus(saved.reminderAt && Date.parse(saved.reminderAt) <= Date.now() ? '任务已添加 · 提醒时间已到，将立即提醒' : '已整理为任务，安排好了。');
+      setTasks(current => [saved, ...current]); setInput(current => current.trim() === source ? '' : current); setFilter('pending'); setCategory('全部'); setSearch('');
+      setAddedTask(saved); setStatus('');
     } catch (error) {
       // Never save a failed parse silently. Keep both the input and editable draft.
       setDraft({ ...emptyDraft(), title: source.slice(0, 500), sourceText: source });
@@ -203,18 +226,20 @@ export default function App() {
     try {
       const saved = await value(api.saveTask({ ...draft, dueAt: fromChinaInput(draft.dueAt), reminderAt: draft.reminderMode === 'custom' ? fromChinaInput(draft.reminderAt) : undefined, reminderTimes: draft.reminderTimes }));
       setTasks(current => draft.id ? current.map(task => task.id === saved.id ? saved : task) : [saved, ...current]);
+      dispatchReminder({ type: 'sync', task: saved });
+      if (!draft.id) setAddedTask(saved); else if (addedTask?.id === saved.id) setAddedTask(null);
       if (!draft.id && draft.sourceText && draft.sourceText === input.trim()) setInput('');
-      setDraft(null); setStatus(draft.id ? '任务已更新' : '任务已添加');
+      setDraft(null); setStatus(draft.id ? `已更新 · ${taskFeedback(saved)}` : '');
     } catch (error) { setDraftError(errorText(error)); }
     finally { setDraftBusy(false); }
   }
   async function toggle(task: Task) {
-    try { const saved = await value(api.toggleTask(task.id, !task.completed)); setTasks(current => current.map(item => item.id === saved.id ? saved : item)); setStatus(saved.completed ? '做得好，又完成了一件事。' : '任务已恢复为待办'); }
+    try { const saved = await value(api.toggleTask(task.id, !task.completed)); setTasks(current => current.map(item => item.id === saved.id ? saved : item)); dispatchReminder({ type: 'sync', task: saved }); if (addedTask?.id === saved.id) setAddedTask(null); setStatus(saved.completed ? '做得好，又完成了一件事。' : '任务已恢复为待办'); }
     catch (error) { setStatus(errorText(error)); }
   }
   async function deleteTask() {
     if (!deleteId) return;
-    try { await value(api.deleteTask(deleteId)); setTasks(current => current.filter(task => task.id !== deleteId)); setDeleteId(null); setStatus('任务已删除'); }
+    try { await value(api.deleteTask(deleteId)); setTasks(current => current.filter(task => task.id !== deleteId)); dispatchReminder({ type: 'resolve', id: deleteId }); if (addedTask?.id === deleteId) setAddedTask(null); setDeleteId(null); setStatus('任务已删除'); }
     catch (error) { setStatus(errorText(error)); }
   }
   async function submitReminderResponse(event: FormEvent) {
@@ -226,17 +251,32 @@ export default function App() {
     try {
       const saved = await value(api.respondReminder(reminderPrompt.id, response));
       setTasks(current => current.map(item => item.id === saved.id ? saved : item));
-      setReminderPrompt(null); setReminderReply('');
+      dispatchReminder({ type: 'resolve', id: saved.id }); reminderAudio.current?.pause();
+      if (addedTask?.id === saved.id) setAddedTask(null);
       setStatus(saved.completed ? '已收到回复，任务完成。' : `已安排下次提醒：${timeLabel(saved.reminderAt)}`);
     } catch (error) { setReminderError(errorText(error)); }
     finally { setReminderBusy(false); }
+  }
+  function dismissReminder() {
+    if (!reminderPrompt || reminderBusy) return;
+    dispatchReminder({ type: 'dismiss', id: reminderPrompt.id }); reminderAudio.current?.pause();
+  }
+  async function undoAdded() {
+    if (!addedTask || undoBusy) return;
+    const task = addedTask; setUndoBusy(true);
+    try {
+      await value(api.undoAddedTask(task.id));
+      setTasks(current => current.filter(item => item.id !== task.id)); dispatchReminder({ type: 'resolve', id: task.id });
+      setAddedTask(null); setInput(current => current || task.sourceText); setStatus('已撤销添加，原文已保留。');
+    } catch (error) { setStatus(errorText(error)); setAddedTask(null); }
+    finally { setUndoBusy(false); }
   }
   async function saveSettings(event?: FormEvent) {
     event?.preventDefault(); if (settingsBusy) return;
     setSettingsBusy(true); setSettingsStatus('');
     try {
-      const saved = await value(api.saveSettings({ apiKey: apiKey.trim() || undefined, model: model.trim(), startAtLogin, reminderSoundEnabled, theme }));
-      setSettings(saved); setApiKey(''); setSettingsOpen(false); setStatus(saved.hasApiKey ? '设置已保存，可以开始添加任务了' : '设置已保存，随时可以手动添加任务');
+      const saved = await value(api.saveSettings({ apiKey: apiKey.trim() || undefined, model: model.trim(), startAtLogin, reminderSoundEnabled, theme, quickShortcut: shortcut }));
+      setSettings(saved); setShortcut(saved.quickShortcut); setApiKey(''); setSettingsOpen(false); setStatus(saved.hasApiKey ? '设置已保存，可以开始添加任务了' : '设置已保存，随时可以手动添加任务');
     } catch (error) { setSettingsStatus(errorText(error)); }
     finally { setSettingsBusy(false); }
   }
@@ -264,27 +304,35 @@ export default function App() {
       <main className="task-list" aria-label="任务列表">
         {!loaded ? <div className="empty"><div className="empty-icon"><Icon name="clock" size={28}/></div><h2>正在打开你的计划…</h2></div> : visible.length === 0 ? <div className="empty"><div className="empty-illustration"><span className="mini-line"/><span className="mini-line short"/><span className="mini-check"><Icon name="check" size={21}/></span></div><h2>{loadFailed ? '任务暂时无法读取' : search || category !== '全部' ? '没有找到相关任务' : filter === 'done' ? '每一步完成，都值得记录' : filter === 'overdue' ? '没有逾期的事情' : '留一点空间，给接下来的计划'}</h2><p>{loadFailed ? status : '一句话记下来，剩下的交给轻任务。'}</p>{loadFailed ? <button className="text-button" onClick={() => void load()}>重新读取</button> : <button className="text-button" onClick={() => openDraft()}>创建第一条任务 <Icon name="arrow" size={14}/></button>}</div> : visible.map(task => <article key={task.id} className={`task-card ${task.completed ? 'completed' : ''} ${overdue(task,now) ? 'overdue' : ''}`}><button className="check" aria-label={`${task.completed ? '恢复' : '完成'}：${task.title}`} onClick={() => void toggle(task)}>{task.completed && <Icon name="check" size={13}/>}</button><div className="task-body"><div className="task-title">{task.title}</div><div className="task-meta"><span className={`tag category-${task.category}`}>{task.category}</span><span className="task-time"><Icon name="clock" size={12}/>{timeLabel(task.dueAt)}{overdue(task,now) && ' · 已逾期'}</span></div>{task.reminderAt && <div className="reminder-line"><Icon name="bell" size={11}/> {timeLabel(task.reminderAt)} 提醒</div>}{task.notes && <p className="task-notes">{task.notes}</p>}</div><div className="task-actions"><button className="icon-button" aria-label={`编辑：${task.title}`} onClick={() => openDraft(task)}><Icon name="edit" size={14}/></button><button className="icon-button" aria-label={`删除：${task.title}`} onClick={() => setDeleteId(task.id)}><Icon name="trash" size={14}/></button></div></article>)}
       </main>
-      <footer className="composer-area"><div className="composer-label"><span><Icon name="spark" size={14}/> 一句话，安排好</span><div className="composer-tools"><button className="text-button" onClick={() => startImport(() => api.chooseImportFiles())} disabled={busy}>导入文件</button><button className="text-button" onClick={() => startImport(() => api.importClipboardImage())} disabled={busy} title="也可以直接按 Ctrl+V 粘贴截图">粘贴截图</button><button className="text-button" onClick={() => openDraft()} disabled={busy}><Icon name="plus" size={12}/> 手动添加</button></div></div><div className={`composer ${busy ? 'busy' : ''}`}><textarea aria-label="自然语言任务" aria-keyshortcuts="Enter Shift+Enter" placeholder="比如：明天下午 3 点开会，提前 10 分钟提醒" value={input} maxLength={4000} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); if (!event.repeat) void addWithAI(); } }} rows={2}/><div className="composer-bottom"><span>{busy ? '正在理解你的安排…' : 'Enter 发送 · Shift+Enter 换行'}</span><button className="add-button" onClick={() => void addWithAI()} disabled={busy || !input.trim() || loadFailed}>{busy ? <span className="spinner"/> : <Icon name="plus" size={15}/>} {busy ? '整理中' : '添加任务'}</button></div></div><div className="status-line" role="status">{status || <><span className="local-dot"/>仅保存在本机 <span className="shortcut">拖动右下角调整大小</span></>}</div></footer>
+      <footer className="composer-area"><div className="composer-label"><span><Icon name="spark" size={14}/> 一句话，安排好</span><div className="composer-tools"><button className="text-button" onClick={() => startImport(() => api.chooseImportFiles())} disabled={busy}>导入文件</button><button className="text-button" onClick={() => startImport(() => api.importClipboardImage())} disabled={busy} title="也可以直接按 Ctrl+V 粘贴截图">粘贴截图</button><button className="text-button" onClick={() => openDraft()} disabled={busy}><Icon name="plus" size={12}/> 手动添加</button></div></div><div className={`composer ${busy ? 'busy' : ''}`}><textarea ref={composer} aria-label="自然语言任务" aria-keyshortcuts="Enter Shift+Enter" placeholder="比如：明天下午 3 点开会，提前 10 分钟提醒" value={input} maxLength={4000} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); if (!event.repeat) void addWithAI(); } }} rows={2}/><div className="composer-bottom"><span>{busy ? '正在理解你的安排…' : 'Enter 发送 · Shift+Enter 换行'}</span><button className="add-button" onClick={() => void addWithAI()} disabled={busy || !input.trim() || loadFailed}>{busy ? <span className="spinner"/> : <Icon name="plus" size={15}/>} {busy ? '整理中' : '添加任务'}</button></div></div><div className="status-line" role="status">{addedTask && <div className="added-feedback"><div><strong>已添加 · {addedTask.title}</strong><span>{taskFeedback(addedTask)}</span></div><button className="text-button" disabled={undoBusy} onClick={() => openDraft(addedTask)}>修改</button><button className="text-button" disabled={undoBusy} onClick={() => void undoAdded()}>撤销</button></div>}{status || (!addedTask && <><span className="local-dot"/>仅保存在本机 <span className="shortcut">拖动右下角调整大小</span></>)}</div></footer>
       <div className="panel-footer"><span><span className={`connection-dot ${settings?.hasApiKey ? 'connected' : ''}`}/>{settings?.hasApiKey ? 'DeepSeek 已连接' : '手动记录模式'}</span><button onClick={async () => { try { const paused = await value(api.setPaused(!settings?.paused)); setSettings(current => current ? { ...current, paused } : current); } catch (error) { setStatus(errorText(error)); } }}><Icon name="pin" size={11}/>{settings?.paused ? '已固定展开' : '贴边自动隐藏'}</button></div>
     </section>
-    <button className="edge-handle" aria-label="展开或收起任务窗口" onPointerDown={handleDragStart} onPointerMove={handleDragMove} onPointerUp={handleDragEnd} onPointerCancel={handleDragEnd} onClick={handleHandleClick}><span className="handle-dot"/>轻任务<span className="handle-grip">•••</span></button>
     {([['right', '调整窗口宽度'], ['bottom', '调整窗口高度'], ['bottom-right', '调整窗口宽高']] as const).map(([edge, label]) => <div key={edge} className={`resize-handle resize-${edge}`} title={label} aria-label={label} onPointerDown={event => handleResizeStart(event, edge)} onPointerMove={handleResizeMove} onPointerUp={handleResizeEnd} onPointerCancel={handleResizeEnd} onLostPointerCapture={handleResizeEnd}>{edge === 'bottom-right' && <Icon name="resize" size={15}/>}</div>)}
 
     {dragOver && !importSource && <div className="file-drop-overlay"><div><strong>松开，把通知交给轻任务</strong><p>PDF · Word · 截图 · TXT / Markdown / CSV</p><span>一次最多 8 个文件，每个不超过 20 MB</span></div></div>}
     {importSource && <ImportDialog source={importSource} hasKey={!!settings?.hasApiKey} onClose={closeImport} onSaved={saved => {
-      setTasks(current => [...saved, ...current]); closeImport(); setFilter('pending'); setCategory('全部'); setSearch('');
-      setStatus(`已导入 ${saved.length} 条待办，提醒已按预览安排。`);
+      saved.tasks.forEach(task => dispatchReminder({ type: 'sync', task })); setAddedTask(null); setTasks(current => [...saved.tasks, ...current.filter(task => !saved.tasks.some(item => item.id === task.id))]); closeImport(); setFilter('pending'); setCategory('全部'); setSearch('');
+      setStatus(`已新增 ${saved.created} 条，更新 ${saved.updated} 条${saved.skipped ? `，跳过 ${saved.skipped} 条重复提醒` : ''}。`);
     }}/>}
     {profileOpen && <CampusProfileDialog profile={settings?.campusProfile} required={!!settings?.needsCampusSetup} onClose={() => setProfileOpen(false)} onSave={async campusProfile => {
       const saved = await value(api.saveSettings({ campusProfile })); setSettings(saved); setProfileOpen(false);
       if (saved.firstRun) setSettingsOpen(true);
       setStatus('校园资料已保存，新任务会使用新的日期提醒偏好。');
     }}/>}
-    {settingsOpen && !profileOpen && <Modal title={settings?.firstRun ? '欢迎使用轻任务' : '偏好设置'} subtitle="粘贴自己的 DeepSeek Key，即可用一句话安排任务。" onClose={() => { if (!settings?.firstRun) { setSettingsOpen(false); setApiKey(''); } else void saveSettings(); }}>
+    {settingsOpen && !profileOpen && <Modal title={settings?.firstRun ? '欢迎使用轻任务' : '偏好设置'} subtitle="粘贴自己的 DeepSeek Key，即可用一句话安排任务。" onClose={() => { if (!settingsBusy) { setSettingsOpen(false); setApiKey(''); setShortcut(settings?.quickShortcut ?? DEFAULT_QUICK_SHORTCUT); } }}>
       <form onSubmit={event => void saveSettings(event)}>
         <div className="campus-settings-card"><div><strong>我的校园资料</strong><p>{settings?.campusProfile ? [settings.campusProfile.stage, settings.campusProfile.major || '专业未填'].join(' · ') : '补充资料，让通知判断更有针对性'}</p><span className="field-hint">{settings?.campusProfile?.shareWithAI ? 'AI 个性化判断已开启' : '校园资料仅本地保存'}</span></div><button type="button" className="secondary" disabled={settingsBusy} onClick={() => setProfileOpen(true)}>修改资料</button></div>
         <label>DeepSeek API Key<input autoFocus type="password" autoComplete="off" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings?.hasApiKey ? '已加密保存，留空保持不变' : '在这里粘贴你的 API Key'}/></label>
         <div className="model-row"><label>模型<input value={model} onChange={event => setModel(event.target.value)} required maxLength={100}/></label><button type="button" className="secondary" disabled={settingsBusy || (!apiKey && !settings?.hasApiKey)} onClick={() => void testKey()}>{settingsBusy ? '请稍候…' : '测试连接'}</button></div>
+        <label>快速呼出快捷键<input aria-label="快速呼出快捷键" value={shortcut} placeholder="留空关闭，例如 Ctrl+Alt+Q" maxLength={60} onChange={event => setShortcut(event.target.value)} onKeyDown={event => {
+          if (event.nativeEvent.isComposing || ['Tab', 'Escape', 'Backspace', 'Delete'].includes(event.key)) return;
+          if ((event.ctrlKey || event.altKey) && !['Control', 'Alt', 'Shift'].includes(event.key)) {
+            event.preventDefault();
+            const key = /^Key[A-Z]$/.test(event.code) ? event.code.slice(3) : /^Digit[0-9]$/.test(event.code) ? event.code.slice(5) : event.key.toUpperCase();
+            setShortcut([event.ctrlKey && 'Ctrl', event.altKey && 'Alt', event.shiftKey && 'Shift', key].filter(Boolean).join('+'));
+          }
+        }}/></label><p className="field-hint">点击后按组合键，或直接输入；留空关闭。展开后可直接输入，Esc 收起窗口。</p>
+        {settings?.quickShortcutError && <p className="form-message error">当前快捷键未生效：{settings.quickShortcutError}</p>}
         <label className="checkbox-label"><input type="checkbox" checked={startAtLogin} onChange={event => setStartAtLogin(event.target.checked)}/> 开机时自动启动到系统托盘</label>
         <label className="checkbox-label"><input type="checkbox" checked={reminderSoundEnabled} onChange={event => setReminderSoundEnabled(event.target.checked)}/> 开启提醒提示音</label>
         <div className="sound-folder-row"><p className="field-hint sound-hint">内置“冰、牛、哇哦”三个提示音。可放入自己的 .wav、.mp3 等音频，按文件名依次循环；文件夹为空时使用内置音频。</p><button type="button" className="secondary" onClick={async () => { try { await value(api.openReminderAudioFolder()); setSettingsStatus('音频文件夹已打开，可添加或替换提示音。'); } catch (error) { setSettingsStatus(errorText(error)); } }}>打开音频文件夹</button></div>
@@ -297,7 +345,7 @@ export default function App() {
       </form>
     </Modal>}
     {draft && <Modal title={draft.id ? '编辑任务' : '添加任务'} subtitle="所有时间均为北京时间（UTC+8）。" onClose={() => { if (!draftBusy) setDraft(null); }}><form onSubmit={event => void saveDraft(event)} className="draft-form"><label>任务名称<input autoFocus required maxLength={500} value={draft.title} onChange={event => setDraft({ ...draft, title: event.target.value })}/></label><div className="field-row"><label>截止时间<input type="datetime-local" value={draft.dueAt} onChange={event => setDraft({ ...draft, dueAt: event.target.value })}/></label><label>分类<select value={draft.category} onChange={event => setDraft({ ...draft, category: event.target.value as Task['category'] })}>{CATEGORIES.map(item => <option key={item}>{item}</option>)}</select></label></div><label>提醒<select value={draft.reminderMode} disabled={!draft.dueAt} onChange={event => setDraft({ ...draft, reminderMode: event.target.value as ReminderMode })}><option value="default">到点提醒（默认）</option><option value="custom">指定提醒时间</option><option value="none">不提醒</option></select></label>{draft.dueAt && draft.reminderMode === 'custom' && <label>提醒时间<input type="datetime-local" required value={draft.reminderAt} onChange={event => setDraft({ ...draft, reminderAt: event.target.value })}/></label>}<label>备注<textarea rows={2} maxLength={4000} value={draft.notes} onChange={event => setDraft({ ...draft, notes: event.target.value })}/></label>{draft.sourceText && <details className="source-text"><summary>查看原始输入</summary><p>{draft.sourceText}</p></details>}{!draft.dueAt && <p className="field-hint">没有截止时间时不提醒。</p>}<p className="form-message error" role="alert">{draftError}</p><div className="modal-actions"><button type="button" className="secondary" disabled={draftBusy} onClick={() => setDraft(null)}>取消</button><button type="submit" className="primary" disabled={draftBusy}>{draftBusy ? '保存中…' : '保存任务'}</button></div></form></Modal>}
-    {reminderPrompt && <Modal title="该行动啦" subtitle="用普通话回复就可以，轻任务会理解你的意思。" onClose={() => { if (!reminderBusy) { setReminderPrompt(null); setReminderReply(''); setReminderError(''); } }}><div className="reminder-prompt"><strong>{reminderPrompt.title}</strong><p>可以回复“好的”“收到，我马上处理”或“hao”；如果还没做，直接说“半小时后再提醒我”或“明天上午9点提醒我”。</p></div><form onSubmit={event => void submitReminderResponse(event)}><label>你的回复<input autoFocus value={reminderReply} onChange={event => setReminderReply(event.target.value)} placeholder="例如：好的，或半小时后再提醒我" maxLength={500}/></label><p className="form-message error" role="alert">{reminderError}</p><div className="modal-actions"><button type="button" className="secondary" disabled={reminderBusy} onClick={() => { setReminderPrompt(null); setReminderReply(''); setReminderError(''); }}>暂不回复（5分钟后提醒）</button><button type="submit" className="primary" disabled={reminderBusy}>{reminderBusy ? '理解中…' : '确认回复'}</button></div></form></Modal>}
+    {reminderPrompt && <Modal key={reminderPrompt.id} title="该行动啦" subtitle={reminders.tasks.length > 1 ? `还有 ${reminders.tasks.length - 1} 条排队，逐条回复即可。` : '用自己的话回复即可。'} onClose={dismissReminder}><div className="reminder-prompt"><strong>{reminderPrompt.title}</strong><p>可以回复“好的”“收到，我马上处理”或“hao”；如果还没做，直接说“半小时后再提醒我”或“明天上午9点提醒我”。</p></div><form onSubmit={event => void submitReminderResponse(event)}><label>你的回复<input autoFocus value={reminderReply} onChange={event => dispatchReminder({ type: 'reply', id: reminderPrompt.id, text: event.target.value })} onKeyDown={event => { if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) event.preventDefault(); }} placeholder="例如：好的，或半小时后再提醒我" maxLength={500}/></label><p className="form-message error" role="alert">{reminderError}</p><div className="modal-actions"><button type="button" className="secondary" disabled={reminderBusy} onClick={dismissReminder}>暂不回复（5分钟后提醒）</button><button type="submit" className="primary" disabled={reminderBusy}>{reminderBusy ? '理解中…' : '确认回复'}</button></div></form></Modal>}
     {deleteId && <Modal title="删除这条任务？" subtitle="删除后无法恢复。" onClose={() => setDeleteId(null)}><p className="delete-title">{tasks.find(task => task.id === deleteId)?.title}</p><div className="modal-actions"><button className="secondary" onClick={() => setDeleteId(null)}>取消</button><button className="danger" onClick={() => void deleteTask()}>删除任务</button></div></Modal>}
   </div>;
 }

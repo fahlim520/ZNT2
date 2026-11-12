@@ -36,7 +36,7 @@ body { overflow: hidden; }
 button, input, textarea, select { font: inherit; }
 button { border: 0; cursor: pointer; }
 button:disabled { cursor: default; opacity: .5; }
-.app-shell { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; padding: 0 0 24px; overflow: hidden; background: #fbfcfb; }
+.app-shell { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; padding: 0 0 7px; overflow: hidden; background: #fbfcfb; }
 .panel { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; border-radius: 18px; background: #fbfcfb; box-shadow: 0 20px 50px #17344718, 0 0 0 1px #ffffff; }
 .titlebar, .overview, .filter-tabs, .toolbar, .composer-area, .panel-footer { flex-shrink: 0; }
 .titlebar { height: 84px; padding: 16px 18px; display: flex; align-items: center; justify-content: space-between; background: linear-gradient(125deg, #dff5f4 0%, #f4faf9 56%, #eef8f7 100%); border-bottom: 1px solid #e2eeee; cursor: move; touch-action: none; user-select: none; }
@@ -114,14 +114,16 @@ button:disabled { cursor: default; opacity: .5; }
 .spinner { width: 11px; height: 11px; border: 1.5px solid #ffffff66; border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .status-line { min-height: 19px; padding-top: 7px; color: #96a4a6; font-size: 9px; }
+.added-feedback { display: flex; align-items: center; gap: 8px; padding: 6px 0; color: var(--theme-text, #38515e); }
+.added-feedback > div { min-width: 0; flex: 1; }
+.added-feedback strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.added-feedback span { display: block; margin-top: 3px; line-height: 1.5; }
+.added-feedback button { flex-shrink: 0; }
 .local-dot, .connection-dot { display: inline-block; width: 6px; height: 6px; margin: 0 5px 1px 0; border-radius: 50%; background: #c5d3d2; }
 .connection-dot.connected, .local-dot { background: #55b487; }
 .shortcut { float: right; color: #b6c0c0; }
 .panel-footer { display: flex; justify-content: space-between; padding: 8px 17px 10px; border-top: 1px solid #edf1f0; color: #a1aeae; font-size: 9px; }
 .panel-footer button { display: inline-flex; align-items: center; gap: 4px; color: #8fa4a6; background: transparent; font-size: 9px; }
-.edge-handle { position: absolute; bottom: 0; left: 50%; display: flex; align-items: center; gap: 7px; height: 24px; padding: 0 14px; transform: translateX(-50%); border-radius: 10px 10px 0 0; color: #fff; background: #2aaf9a; font-size: 9px; box-shadow: 0 -5px 15px #277d7040; touch-action: none; user-select: none; }
-.handle-dot { width: 6px; height: 6px; border-radius: 50%; background: #d9f7ed; }.handle-grip { color: #bdeadd; letter-spacing: 2px; }
-.edge-handle { z-index: 6; }
 .resize-handle { position: absolute; z-index: 5; touch-action: none; user-select: none; }
 .resize-right { top: 8px; right: 0; bottom: 16px; width: 6px; cursor: ew-resize; }
 .resize-bottom { right: 16px; bottom: 0; left: 8px; height: 7px; cursor: ns-resize; }
@@ -193,7 +195,6 @@ button:disabled { cursor: default; opacity: .5; }
 .app-shell .add-button { background: var(--theme-primary); }
 .app-shell .add-button:hover { background: var(--theme-primary-hover); }
 .app-shell .connection-dot.connected, .app-shell .local-dot { background: var(--theme-primary); }
-.app-shell .edge-handle { background: var(--theme-primary-hover); box-shadow: 0 -5px 15px var(--theme-shadow); }
 .app-shell .resize-bottom-right:hover { color: var(--theme-primary); }
 .app-shell .modal input:focus, .app-shell .modal select:focus, .app-shell .modal textarea:focus { border-color: var(--theme-primary-border); box-shadow: 0 0 0 3px var(--theme-shadow); }
 .app-shell .primary { background: var(--theme-primary); }
@@ -245,3 +246,8 @@ button:disabled { cursor: default; opacity: .5; }
 .assessment-uncertain, .assessment-unrelated { border-color: #bc8436; background: #fff8ed; }
 .import-reparse { margin: 8px 0; font-size: 11px; line-height: 1.6; }
 .import-reparse button { margin-right: 8px; }
+.notice-match { margin: 9px 0; padding: 10px; border-radius: 9px; background: #f0f5f4; color: #526963; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.notice-match p { margin: 5px 0; }
+.notice-update { background: #fff7e9; color: #8a622b; }
+.notice-match .text-button { margin-top: 7px; font-size: 10px; }
+.import-time-summary { font-size: 11px; color: #547468; line-height: 1.7; }
