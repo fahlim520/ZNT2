@@ -5,6 +5,7 @@ export type Theme = typeof THEMES[number];
 export const THEME_LABELS: Record<Theme, string> = { orange: '伊藤橙', green: '酷安绿', purple: '韵味紫', pink: '哔哩粉' };
 export type ReminderMode = 'default' | 'custom' | 'none';
 export interface Task {
+  reviewWarnings?: string[];
   noticeHistory?: Array<{ title: string; dueAt?: string; sourceText: string }>;
   sourceType?: 'text' | 'file';
   id: string;
@@ -24,6 +25,7 @@ export interface Task {
   responseDueAt?: string;
 }
 export interface TaskInput {
+  reviewWarnings?: string[];
   sourceType?: 'text' | 'file';
   id?: string;
   title: string;
@@ -63,6 +65,7 @@ export interface DesktopApi {
   getTasks(): Promise<Result<Task[]>>;
   saveTask(task: TaskInput): Promise<Result<Task>>;
   deleteTask(id: string): Promise<Result<boolean>>;
+  deleteCompletedTasks(ids: string[]): Promise<Result<string[]>>;
   undoAddedTask(id: string): Promise<Result<boolean>>;
   toggleTask(id: string, completed: boolean): Promise<Result<Task>>;
   respondReminder(id: string, response: string): Promise<Result<Task>>;
@@ -110,11 +113,12 @@ export function isoDate(value: unknown, label: string): string | undefined {
     || Number(value.slice(11, 13)) > 23) throw new Error(`${label}不是有效日期`);
   return new Date(time).toISOString();
 }
-export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title' | 'category' | 'notes' | 'sourceText' | 'reminderMode'>> & Pick<TaskInput, 'id' | 'dueAt' | 'reminderAt' | 'reminderTimes' | 'sourceType'> {
+export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title' | 'category' | 'notes' | 'sourceText' | 'reminderMode'>> & Pick<TaskInput, 'id' | 'dueAt' | 'reminderAt' | 'reminderTimes' | 'sourceType' | 'reviewWarnings'> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('任务格式不正确');
   const raw = value as Record<string, unknown>;
   if (raw.sourceType !== undefined && !['text', 'file'].includes(raw.sourceType as string)) throw new Error('任务来源不正确');
   const title = text(raw.title, '任务名称', 500, true);
+  const reviewWarnings = Array.isArray(raw.reviewWarnings) ? raw.reviewWarnings.filter((item): item is string => typeof item === 'string' && !!item.trim()).slice(0, 8).map(item => item.trim().slice(0, 800)) : undefined;
   const category = raw.category ?? '其他';
   if (!CATEGORIES.includes(category as Category)) throw new Error('请选择有效分类');
   const dueAt = isoDate(raw.dueAt, '截止时间');
@@ -136,7 +140,7 @@ export function normalizeInput(value: unknown): Required<Pick<TaskInput, 'title'
     if (Date.parse(reminderAt) > Date.parse(dueAt)) throw new Error('提醒时间不能晚于截止时间');
   }
   if (reminderTimes?.some(item => dueAt && Date.parse(item) > Date.parse(dueAt))) throw new Error('提醒时间不能晚于截止时间');
-  return { id: raw.id ? text(raw.id, '任务编号', 100, true) : undefined, sourceType: raw.sourceType as TaskInput['sourceType'], title, category: category as Category, dueAt, reminderAt, reminderTimes, reminderMode: mode as ReminderMode, notes: text(raw.notes, '备注', 4000), sourceText: text(raw.sourceText, '原始输入', 4000) };
+  return { id: raw.id ? text(raw.id, '任务编号', 100, true) : undefined, sourceType: raw.sourceType as TaskInput['sourceType'], title, category: category as Category, dueAt, reminderAt, reminderTimes, reminderMode: mode as ReminderMode, notes: text(raw.notes, '备注', 4000), sourceText: text(raw.sourceText, '原始输入', 4000), ...(reviewWarnings?.length ? { reviewWarnings } : {}) };
 }
 export function saveTaskRecord(input: unknown, existing: Task | undefined, id: string, now = new Date().toISOString()): Task {
   const clean = normalizeInput(input);

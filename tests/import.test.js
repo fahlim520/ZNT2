@@ -20,9 +20,8 @@ test('document events keep separate explicit clocks, date-only schedules, and un
   assert.equal(result[0].task.sourceType, 'file');
   assert.match(result[0].task.notes, /校园通知.pdf/);
   assert.equal(result[1].task.dueAt, '2026-10-27T15:59:00.000Z');
-  assert.equal(result[1].task.reminderAt, '2026-10-24T03:00:00.000Z');
-  assert.ok(result[1].task.reminderTimes.includes('2026-10-25T01:00:00.000Z'));
-  assert.ok(result[1].task.reminderTimes.includes('2026-10-27T02:00:00.000Z'));
+  assert.equal(result[1].task.reminderAt, '2026-10-26T14:00:00.000Z');
+  assert.deepEqual(result[1].task.reminderTimes, ['2026-10-27T04:00:00.000Z']);
   assert.equal(result[2].task.dueAt, undefined);
   assert.equal(result[2].task.reminderAt, undefined);
   assert.equal(result[2].needsReview, true);

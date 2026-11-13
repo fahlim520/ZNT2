@@ -1,12 +1,14 @@
-export const DEFAULT_QUICK_SHORTCUT = 'Ctrl+Alt+Q';
+export const DEFAULT_QUICK_SHORTCUT = 'Ctrl+`';
 export function normalizeShortcut(value: unknown): string {
   if (value === '') return '';
   if (typeof value !== 'string' || value.length > 60) throw new Error('快捷键格式不正确');
   const parts = value.split('+').map(part => part.trim());
-  const key = parts.pop()?.toUpperCase();
-  if (!key || !/^(?:[A-Z0-9]|F(?:[1-9]|1[0-9]|2[0-4]))$/.test(key) || !parts.length
+  const rawKey = parts.pop()?.toUpperCase();
+  // The ~ label refers to the top-left backquote key, without adding Shift.
+  const key = rawKey === '~' || rawKey === 'BACKQUOTE' ? '`' : rawKey;
+  if (!key || !/^(?:[A-Z0-9`]|F(?:[1-9]|1[0-9]|2[0-4]))$/.test(key) || !parts.length
     || parts.some(part => !['Ctrl', 'Alt', 'Shift'].includes(part)) || new Set(parts).size !== parts.length
-    || (!parts.includes('Ctrl') && !parts.includes('Alt'))) throw new Error('请使用 Ctrl / Alt 搭配字母、数字或 F1–F24，可附加 Shift');
+    || (!parts.includes('Ctrl') && !parts.includes('Alt'))) throw new Error('请使用 Ctrl / Alt 搭配字母、数字、左上角 ~ 键或 F1–F24，可附加 Shift');
   if ((!parts.includes('Ctrl') && parts.includes('Alt') && key === 'F4') || (parts.length === 1 && parts[0] === 'Ctrl' && ['C', 'V', 'X', 'Z', 'A', 'S', 'F', 'W', 'Q'].includes(key))) throw new Error('请避开常用系统快捷键，建议 Ctrl+Alt+字母');
   return [...['Ctrl', 'Alt', 'Shift'].filter(modifier => parts.includes(modifier)), key].join('+');
 }

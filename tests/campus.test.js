@@ -40,10 +40,10 @@ test('profile consent gates AI data; context excludes scheduler fields and crede
   assert.equal(campusAIContext({ ...profile, stage: '暂不填写' }).stage, null);
 });
 
-test('daily preference plans each day and handles late today and past days without moving deadlines', () => {
+test('future dates use evening/noon and today respects the daily preference without moving deadlines', () => {
   const scheduled = dateOnlyImportSchedule('2026-11-06', now.getTime(), profile);
-  assert.equal(scheduled.reminderAt, '2026-11-04T11:00:00.000Z');
-  assert.deepEqual(scheduled.reminderTimes, ['2026-11-05T11:00:00.000Z', '2026-11-06T11:00:00.000Z']);
+  assert.equal(scheduled.reminderAt, '2026-11-05T14:00:00.000Z');
+  assert.deepEqual(scheduled.reminderTimes, ['2026-11-06T04:00:00.000Z']);
   assert.equal(scheduled.dueAt, '2026-11-06T15:59:00.000Z');
   const late = dateOnlyImportSchedule('2026-11-04', Date.parse('2026-11-04T23:58:00+08:00'), profile);
   assert.equal(late.reminderAt, late.dueAt);
@@ -75,7 +75,7 @@ test('semantic date-only output supports non-relative dates with local preferenc
   t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ title: '交作业', timeStatus: 'date-only', dueDate: '2026-11-30', dueAt: '2026-11-30T23:59:00+08:00', reminderMode: 'default' }) } }] }) }));
   const task = await parseTask('月底交作业', 'test-key', 'test-model', now, profile);
   assert.equal(task.dueAt, '2026-11-30T15:59:00.000Z');
-  assert.equal(task.reminderAt, '2026-11-04T11:00:00.000Z');
+  assert.equal(task.reminderAt, '2026-11-29T14:00:00.000Z');
 });
 
 test('document matching retains unrelated and uncertain candidates for human confirmation', () => {

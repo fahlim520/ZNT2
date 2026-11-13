@@ -5,6 +5,7 @@ import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DockWindow } from './dock';
 import { collectDueReminders } from './reminder-delivery';
+import { deleteCompletedTasks } from './completed-tasks';
 import { DEFAULT_QUICK_SHORTCUT, QuickShortcut } from './quick-shortcut';
 import { undoableTaskVersion } from './task-feedback';
 import { LocalStore } from './store';
@@ -34,6 +35,23 @@ let notificationErrorShown = false;
 const activeNotifications = new Set<Notification>();
 let quickShortcut: QuickShortcut;
 const undoableAdds = new Map<string, { version: string; expires: number }>();
+
+function notifyOptionalReview(items: Array<{ title: string; warnings: string[] }>) {
+  const affected = items.filter(item => item.warnings.length);
+  if (!affected.length) return;
+  try {
+    if (!Notification.isSupported()) return;
+    const lines = affected.slice(0, 3).map(item => `${item.title.slice(0, 32)}：${item.warnings.join('；').slice(0, 180)}`);
+    if (affected.length > 3) lines.push(`另有 ${affected.length - 3} 条，请在窗口查看。`);
+    lines.push('补充或修改由你决定。');
+    const notification = new Notification({ title: '轻任务 · 信息待补充（可选）', body: lines.join(String.fromCharCode(10)), silent: true });
+    activeNotifications.add(notification);
+    notification.on('click', () => { if (!window.isDestroyed()) dock.show(true); activeNotifications.delete(notification); });
+    notification.on('close', () => activeNotifications.delete(notification));
+    notification.on('failed', () => activeNotifications.delete(notification));
+    notification.show();
+  } catch { /* Advisory notices must never block saving; inline notes remain. */ }
+}
 
 function readKey() {
   const encrypted = store.settings().encryptedApiKey;
@@ -229,6 +247,10 @@ function registerIpc() {
       const candidates = await parseDocuments(checked, key, store.settings().model || DEFAULT_MODEL, controller.signal, new Date(), readCampusProfile(store.settings().campusProfile), clarification, store.tasks());
       if (controller.signal.aborted) throw new Error('已取消整理');
       importCandidates = candidates;
+      notifyOptionalReview(candidates.map(candidate => ({ title: candidate.task.title, warnings: [
+        ...candidate.warnings,
+        ...(candidate.assessment?.status === 'uncertain' ? [candidate.assessment.reason, ...candidate.assessment.questions] : []),
+      ] })));
       return candidates;
     }
     finally { parseBusy = false; if (importController === controller) importController = undefined; }
@@ -258,6 +280,7 @@ function registerIpc() {
     for (const [id, token] of undoableAdds) if (token.expires < Date.now()) undoableAdds.delete(id);
     if (!existing) undoableAdds.set(task.id, { version: undoableTaskVersion(task), expires: Date.now() + 30_000 });
     else undoableAdds.delete(task.id);
+    if (!existing && task.reviewWarnings?.length) notifyOptionalReview([{ title: task.title, warnings: task.reviewWarnings }]);
     setTimeout(checkReminders, 250);
     return task;
   });
@@ -276,6 +299,12 @@ function registerIpc() {
     store.saveTasks(store.tasks().filter(item => item.id !== id));
     undoableAdds.delete(id);
     return true;
+  });
+  handle('tasks:delete-completed', (ids: unknown) => {
+    const result = deleteCompletedTasks(store.tasks(), ids);
+    store.saveTasks(result.tasks);
+    for (const id of result.deletedIds) undoableAdds.delete(id);
+    return result.deletedIds;
   });
   handle('tasks:toggle', (input: { id: string; completed: boolean }) => {
     if (!input || typeof input.id !== 'string' || typeof input.completed !== 'boolean') throw new Error('任务状态不正确');

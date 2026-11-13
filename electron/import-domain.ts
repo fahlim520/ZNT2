@@ -20,17 +20,20 @@ export function dateOnlyImportSchedule(day: string, now = Date.now(), profile?: 
   const reminders: string[] = [];
   if (end > now) {
     const today = chinaDay(now);
-    if (profile?.dateOnlyMode === 'daily') {
+    if (day > today) {
+      const midday = Date.parse(`${day}T12:00:00+08:00`);
+      // A future date is not permission to remind immediately. Use the night
+      // before and noon on the requested date; never replay an elapsed slot.
+      for (const at of [midday - 14 * 3_600_000, midday]) {
+        if (at > now) reminders.push(new Date(at).toISOString());
+      }
+    } else if (profile?.dateOnlyMode === 'daily') {
       // Only date-only tasks use this preference. Never move an explicit clock.
       for (let at = Date.parse(`${today}T${profile.dailyTime}:00+08:00`); at <= end && reminders.length < 366; at += 86_400_000) {
         if (at > now) reminders.push(new Date(at).toISOString());
       }
       // If today's preferred time has passed, keep today's task actionable.
       if (!reminders.length) reminders.push(new Date(Math.min(now + 5 * 60_000, end)).toISOString());
-    } else if (day > today) {
-      reminders.push(new Date(Math.min(now + 3_600_000, Date.parse(`${today}T23:59:00+08:00`))).toISOString());
-      for (let at = Date.parse(`${today}T09:00:00+08:00`) + 86_400_000; chinaDay(at) < day && reminders.length < 365; at += 86_400_000) reminders.push(new Date(at).toISOString());
-      for (let at = Date.parse(`${day}T09:00:00+08:00`); at <= end; at += 3_600_000) reminders.push(new Date(at).toISOString());
     } else {
       for (let at = Math.min(now + 3_600_000, end); at <= end; at += 3_600_000) reminders.push(new Date(at).toISOString());
     }
@@ -76,7 +79,7 @@ export function parseDocumentCandidates(content: string, documents: ImportedDocu
         if (entry.timeStatus === 'date-only') {
           schedule = dateOnlyImportSchedule(entry.dueDate, now, profile);
           if (entry.reminderMode === 'none') schedule = { dueAt: schedule.dueAt, reminderMode: 'none' };
-          else warnings.push(profile?.dateOnlyMode === 'daily' ? `只有日期：每天 ${profile.dailyTime} 提醒；若今天该时刻已过且今天截止，则 5 分钟内提醒。可在下方调整。` : '原文只有日期：当天按小时提醒，提前的日期每天提醒一次；可在下方调整。');
+          else warnings.push(dateOnlyNotice(entry.dueDate, schedule, now));
         } else {
           if (typeof entry.dueAt !== 'string') throw new Error('缺少明确时刻');
           schedule = { dueAt: entry.dueAt, reminderAt: entry.reminderMode === 'custom' ? entry.reminderAt : undefined, reminderMode: ['custom', 'none'].includes(entry.reminderMode) ? entry.reminderMode : 'default' };
@@ -92,6 +95,15 @@ export function parseDocumentCandidates(content: string, documents: ImportedDocu
     if (duplicate) warnings.push('本次导入中可能存在重复任务，请核对后再勾选。');
     const match = resolveNoticeMatch(task, entry.match, existingTasks, document);
     if (entry.match?.kind && entry.match.kind !== 'none' && !match) warnings.push('疑似关联已有事项，但关联依据不足，请核对后再添加。');
+    task.reviewWarnings = [...warnings, ...(assessment?.status === 'uncertain' ? [assessment.reason, ...assessment.questions] : [])].slice(0, 8);
     return { id: `candidate-${index}`, documentId: document.id, task, evidence, warnings, assessment, match, needsReview: !!match || ambiguous || duplicate || assessment?.status === 'uncertain' || assessment?.status === 'unrelated' || warnings.some(item => /已经过去|无效|关联依据不足/.test(item)) };
   });
+}
+
+export function dateOnlyNotice(day: string, schedule: Pick<TaskInput, 'reminderAt' | 'reminderTimes'>, now = Date.now()): string {
+  const times = [schedule.reminderAt, ...(schedule.reminderTimes || [])].filter((at): at is string => !!at);
+  if (!times.length) return '未说明具体时刻，日期已过，暂未安排提醒；可以自行补充或修改。';
+  const format = (at: string) => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(at));
+  const planned = day > chinaDay(now) ? times.map(format).join('、') : `${format(times[0])}${times.length > 1 ? '起每小时' : ''}`;
+  return `未说明具体时刻，已默认安排 ${planned} 提醒。需要更准确的时间可自行补充，不修改也会按此安排。`;
 }

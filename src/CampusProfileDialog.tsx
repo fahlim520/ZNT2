@@ -38,9 +38,9 @@ export default function CampusProfileDialog({ profile, required, onSave, onClose
           <p className="field-hint">不用填写姓名、学号或联系方式。未填的信息会视为未知，需要时再问你；资料可在设置中修改。</p>
         </> : <>
           <fieldset className="campus-interests"><legend>关注哪些事项？<span className="optional">可多选</span></legend><div>{CAMPUS_INTERESTS.map(item => <button key={item} type="button" aria-pressed={interests.includes(item)} className={interests.includes(item) ? 'selected' : ''} onClick={() => setInterests(current => current.includes(item) ? current.filter(value => value !== item) : [...current, item])}>{item}</button>)}</div></fieldset>
-          <label>只有日期、没有具体时刻时<select aria-label="模糊日期提醒方式" value={dateOnlyMode} onChange={event => setDateOnlyMode(event.target.value as CampusProfile['dateOnlyMode'])}><option value="hourly">当天每小时，之前每天一次</option><option value="daily">每天在我选定的时间提醒</option></select></label>
-          {dateOnlyMode === 'daily' && <label>每日提醒时间（北京时间）<input aria-label="每日提醒时间" type="time" required value={dailyTime} onChange={event => setDailyTime(event.target.value)}/><span className="field-hint">今天到期且所选时间已过，会在 5 分钟内提醒。</span></label>}
-          <p className="field-hint">“今天 21 点提醒”始终在 21 点提醒，不会自动提前一小时。此偏好只用于新建任务；提醒未回复仍在 5 分钟后重试。</p>
+          <label>只有日期、没有具体时刻时<select aria-label="模糊日期提醒方式" value={dateOnlyMode} onChange={event => setDateOnlyMode(event.target.value as CampusProfile['dateOnlyMode'])}><option value="hourly">今天每小时；未来日期前晚22点、当天12点</option><option value="daily">今天按自选时刻；未来日期前晚22点、当天12点</option></select></label>
+          {dateOnlyMode === 'daily' && <label>今天的提醒时间（北京时间）<input aria-label="每日提醒时间" type="time" required value={dailyTime} onChange={event => setDailyTime(event.target.value)}/><span className="field-hint">今天到期且所选时间已过，会在 5 分钟内提醒。</span></label>}
+          <p className="field-hint">“今天 21 点提醒”始终在 21 点提醒，不会自动提前一小时。未来日期没有具体时刻时，默认前一天 22:00、当天 12:00 提醒，已过的时段跳过。此偏好只用于新建任务；未回复仍在 5 分钟后重试。</p>
           <label className="checkbox-label campus-consent"><input type="checkbox" aria-label="允许AI使用校园资料" checked={shareWithAI} onChange={event => setShareWithAI(event.target.checked)}/>允许 AI 使用校园资料判断通知相关性</label>
           <p className="field-hint">资料保存在本机。开启后，使用 AI 整理时会把学校、专业、学习阶段、身份及关注事项一起发送给 DeepSeek。关闭后不发送这些资料，日期提醒偏好仍在本地生效。</p>
         </>}

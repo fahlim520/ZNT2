@@ -105,7 +105,7 @@ app.whenReady().then(async () => {
   assert.equal((await js('window.taskDesk.saveSettings({apiKey:"test-only"})')).ok, true);
   await reload(); await click('导入文件');
   await until('document.querySelectorAll(".import-task").length === 1');
-  assert.equal(await js('document.querySelector("[aria-label=选择第1条任务]").checked'), false);
+  assert.equal(await js('document.querySelector("[aria-label=选择第1条任务]").checked'), true);
   assert.equal(await js('document.body.innerText.includes("你属于计算机学院吗？")'), true);
   await field('本次补充', '我是计算机学院的本科生。');
   await click('结合补充重新整理'); await click('重新整理');

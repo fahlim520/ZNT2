@@ -1,6 +1,15 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { QuickShortcut, normalizeShortcut } = require('../dist-electron/quick-shortcut');
+const { DEFAULT_QUICK_SHORTCUT, QuickShortcut, normalizeShortcut } = require('../dist-electron/quick-shortcut');
+test('top-left tilde key uses Ctrl plus backquote without implicit Shift', () => {
+  assert.equal(DEFAULT_QUICK_SHORTCUT, 'Ctrl+`');
+  for (const input of ['Ctrl+`', 'Ctrl+~', 'Ctrl+Backquote']) assert.equal(normalizeShortcut(input), 'Ctrl+`');
+  assert.equal(normalizeShortcut('Alt + Ctrl + ~'), 'Ctrl+Alt+`');
+  assert.equal(normalizeShortcut('Ctrl+Shift+~'), 'Ctrl+Shift+`');
+  const calls = []; const shortcut = new QuickShortcut({ register: key => { calls.push(key); return true; }, unregister: () => {} }, () => {});
+  shortcut.start(DEFAULT_QUICK_SHORTCUT);
+  assert.deepEqual(calls, ['Ctrl+`']); assert.equal(shortcut.active, 'Ctrl+`');
+});
 test('validates keyboard combinations and normalizes modifier order', () => {
   assert.equal(normalizeShortcut('Alt + Ctrl + q'), 'Ctrl+Alt+Q');
   assert.equal(normalizeShortcut('Ctrl+Shift+F12'), 'Ctrl+Shift+F12');

@@ -59,6 +59,11 @@ export default function App() {
   const [draftError, setDraftError] = useState('');
   const [draftBusy, setDraftBusy] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedCompleted, setSelectedCompleted] = useState<string[]>([]);
+  const [bulkConfirm, setBulkConfirm] = useState<string[] | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState('');
   const [now, setNow] = useState(Date.now());
   const [composerFocused, setComposerFocused] = useState(false);
   const [reminders, dispatchReminder] = useReducer(reminderQueueReducer, emptyReminderQueue);
@@ -71,7 +76,7 @@ export default function App() {
   const [addedTask, setAddedTask] = useState<Task | null>(null);
   const [undoBusy, setUndoBusy] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const reminderPrompt = !draft && !deleteId && !settingsOpen && !profileOpen && !importSource ? reminders.tasks[0] ?? null : null;
+  const reminderPrompt = !draft && !deleteId && !bulkConfirm && !settingsOpen && !profileOpen && !importSource ? reminders.tasks[0] ?? null : null;
   const reminderReply = reminderPrompt ? reminders.replies[reminderPrompt.id] || '' : '';
   const importLocked = useRef(false);
   const dragStart = useRef<{ pointerId: number; x: number; y: number } | null>(null);
@@ -117,6 +122,8 @@ export default function App() {
     return () => { offReminder(); offSettings(); offPaused(); clearInterval(timer); };
   }, []);
   useEffect(() => { setReminderError(''); }, [reminderPrompt?.id]);
+  useEffect(() => { setBulkMode(false); setSelectedCompleted([]); setBulkConfirm(null); setBulkError(''); }, [filter, category, search]);
+  useEffect(() => { setSelectedCompleted(current => current.filter(id => tasks.some(task => task.id === id && task.completed))); }, [tasks]);
   useEffect(() => () => reminderAudio.current?.pause(), []);
   useEffect(() => {
     if (!addedTask) return;
@@ -140,9 +147,9 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (!api) return;
-    api.setKeepOpen(profileOpen || settingsOpen || !!draft || !!deleteId || !!reminderPrompt || composerFocused || !!input.trim() || busy || reminderBusy || !!importSource || dragOver);
+    api.setKeepOpen(profileOpen || settingsOpen || !!draft || !!deleteId || !!bulkConfirm || bulkMode || !!reminderPrompt || composerFocused || !!input.trim() || busy || reminderBusy || !!importSource || dragOver);
     return () => api.setKeepOpen(false);
-  }, [profileOpen, settingsOpen, draft, deleteId, reminderPrompt, composerFocused, input, busy, reminderBusy, importSource, dragOver]);
+  }, [profileOpen, settingsOpen, draft, deleteId, bulkConfirm, bulkMode, reminderPrompt, composerFocused, input, busy, reminderBusy, importSource, dragOver]);
   useEffect(() => {
     if (!api) return;
     let depth = 0;
@@ -242,6 +249,20 @@ export default function App() {
     try { await value(api.deleteTask(deleteId)); setTasks(current => current.filter(task => task.id !== deleteId)); dispatchReminder({ type: 'resolve', id: deleteId }); if (addedTask?.id === deleteId) setAddedTask(null); setDeleteId(null); setStatus('任务已删除'); }
     catch (error) { setStatus(errorText(error)); }
   }
+  async function deleteSelectedCompleted() {
+    if (!bulkConfirm?.length || bulkBusy) return;
+    setBulkBusy(true); setBulkError('');
+    try {
+      const deleted = await value(api.deleteCompletedTasks(bulkConfirm));
+      const ids = new Set(deleted);
+      setTasks(current => current.filter(task => !ids.has(task.id)));
+      for (const id of deleted) dispatchReminder({ type: 'resolve', id });
+      if (addedTask && ids.has(addedTask.id)) setAddedTask(null);
+      setSelectedCompleted([]); setBulkConfirm(null); setBulkMode(false);
+      setStatus(`已删除 ${deleted.length} 条已完成任务。`);
+    } catch (error) { setBulkError(errorText(error)); }
+    finally { setBulkBusy(false); }
+  }
   async function submitReminderResponse(event: FormEvent) {
     event.preventDefault();
     if (!reminderPrompt || reminderBusy) return;
@@ -302,7 +323,11 @@ export default function App() {
       <nav className="filter-tabs" aria-label="任务状态">{([['pending','全部待办'], ['today','今天'], ['upcoming','即将到期'], ['overdue','逾期'], ['done','已完成']] as const).map(([key,label]) => <button key={key} className={filter === key ? 'active' : ''} onClick={() => setFilter(key)}>{label}<span className={key === 'overdue' && counts.overdue ? 'red' : ''}>{counts[key]}</span></button>)}</nav>
       <div className="toolbar"><div className="category-row">{['全部',...CATEGORIES].map(item => <button className={category === item ? 'selected' : ''} onClick={() => setCategory(item)} key={item}>{item}</button>)}</div><label className="search"><Icon name="search" size={14}/><input aria-label="搜索任务" value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索任务"/></label></div>
       <main className="task-list" aria-label="任务列表">
-        {!loaded ? <div className="empty"><div className="empty-icon"><Icon name="clock" size={28}/></div><h2>正在打开你的计划…</h2></div> : visible.length === 0 ? <div className="empty"><div className="empty-illustration"><span className="mini-line"/><span className="mini-line short"/><span className="mini-check"><Icon name="check" size={21}/></span></div><h2>{loadFailed ? '任务暂时无法读取' : search || category !== '全部' ? '没有找到相关任务' : filter === 'done' ? '每一步完成，都值得记录' : filter === 'overdue' ? '没有逾期的事情' : '留一点空间，给接下来的计划'}</h2><p>{loadFailed ? status : '一句话记下来，剩下的交给轻任务。'}</p>{loadFailed ? <button className="text-button" onClick={() => void load()}>重新读取</button> : <button className="text-button" onClick={() => openDraft()}>创建第一条任务 <Icon name="arrow" size={14}/></button>}</div> : visible.map(task => <article key={task.id} className={`task-card ${task.completed ? 'completed' : ''} ${overdue(task,now) ? 'overdue' : ''}`}><button className="check" aria-label={`${task.completed ? '恢复' : '完成'}：${task.title}`} onClick={() => void toggle(task)}>{task.completed && <Icon name="check" size={13}/>}</button><div className="task-body"><div className="task-title">{task.title}</div><div className="task-meta"><span className={`tag category-${task.category}`}>{task.category}</span><span className="task-time"><Icon name="clock" size={12}/>{timeLabel(task.dueAt)}{overdue(task,now) && ' · 已逾期'}</span></div>{task.reminderAt && <div className="reminder-line"><Icon name="bell" size={11}/> {timeLabel(task.reminderAt)} 提醒</div>}{task.notes && <p className="task-notes">{task.notes}</p>}</div><div className="task-actions"><button className="icon-button" aria-label={`编辑：${task.title}`} onClick={() => openDraft(task)}><Icon name="edit" size={14}/></button><button className="icon-button" aria-label={`删除：${task.title}`} onClick={() => setDeleteId(task.id)}><Icon name="trash" size={14}/></button></div></article>)}
+        {filter === 'done' && visible.length > 0 && <div className="completed-bulk" aria-label="已完成批量操作">
+          {bulkMode ? <><label className="checkbox-label"><input type="checkbox" aria-label="全选当前列表" checked={visible.every(task => selectedCompleted.includes(task.id))} onChange={event => setSelectedCompleted(event.target.checked ? visible.map(task => task.id) : [])}/>全选当前列表</label><span>已选 {selectedCompleted.length} 条</span><button className="danger-text" disabled={!selectedCompleted.length} onClick={() => { setBulkError(''); setBulkConfirm([...selectedCompleted]); }}>删除所选</button><button className="text-button" onClick={() => { setBulkMode(false); setSelectedCompleted([]); }}>取消选择</button></>
+            : <button className="text-button" onClick={() => setBulkMode(true)}>批量删除</button>}
+        </div>}
+        {!loaded ? <div className="empty"><div className="empty-icon"><Icon name="clock" size={28}/></div><h2>正在打开你的计划…</h2></div> : visible.length === 0 ? <div className="empty"><div className="empty-illustration"><span className="mini-line"/><span className="mini-line short"/><span className="mini-check"><Icon name="check" size={21}/></span></div><h2>{loadFailed ? '任务暂时无法读取' : search || category !== '全部' ? '没有找到相关任务' : filter === 'done' ? '每一步完成，都值得记录' : filter === 'overdue' ? '没有逾期的事情' : '留一点空间，给接下来的计划'}</h2><p>{loadFailed ? status : '一句话记下来，剩下的交给轻任务。'}</p>{loadFailed ? <button className="text-button" onClick={() => void load()}>重新读取</button> : <button className="text-button" onClick={() => openDraft()}>创建第一条任务 <Icon name="arrow" size={14}/></button>}</div> : visible.map(task => <article key={task.id} className={`task-card ${task.completed ? 'completed' : ''} ${overdue(task,now) ? 'overdue' : ''}`}>{filter === 'done' && bulkMode ? <input type="checkbox" className="bulk-task-check" aria-label={`选择删除：${task.title}`} checked={selectedCompleted.includes(task.id)} onChange={event => setSelectedCompleted(current => event.target.checked ? [...new Set([...current, task.id])] : current.filter(id => id !== task.id))}/> : <button className="check" aria-label={`${task.completed ? '恢复' : '完成'}：${task.title}`} onClick={() => void toggle(task)}>{task.completed && <Icon name="check" size={13}/>}</button>}<div className="task-body"><div className="task-title">{task.title}</div>{!!task.reviewWarnings?.length && !task.completed && <details className="task-review-note"><summary>信息待补充（可选）</summary>{task.reviewWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</details>}<div className="task-meta"><span className={`tag category-${task.category}`}>{task.category}</span><span className="task-time"><Icon name="clock" size={12}/>{timeLabel(task.dueAt)}{overdue(task,now) && ' · 已逾期'}</span></div>{task.reminderAt && <div className="reminder-line"><Icon name="bell" size={11}/> {timeLabel(task.reminderAt)} 提醒</div>}{task.notes && <p className="task-notes">{task.notes}</p>}</div><div className="task-actions" hidden={bulkMode && filter === 'done'}><button className="icon-button" aria-label={`编辑：${task.title}`} onClick={() => openDraft(task)}><Icon name="edit" size={14}/></button><button className="icon-button" aria-label={`删除：${task.title}`} onClick={() => setDeleteId(task.id)}><Icon name="trash" size={14}/></button></div></article>)}
       </main>
       <footer className="composer-area"><div className="composer-label"><span><Icon name="spark" size={14}/> 一句话，安排好</span><div className="composer-tools"><button className="text-button" onClick={() => startImport(() => api.chooseImportFiles())} disabled={busy}>导入文件</button><button className="text-button" onClick={() => startImport(() => api.importClipboardImage())} disabled={busy} title="也可以直接按 Ctrl+V 粘贴截图">粘贴截图</button><button className="text-button" onClick={() => openDraft()} disabled={busy}><Icon name="plus" size={12}/> 手动添加</button></div></div><div className={`composer ${busy ? 'busy' : ''}`}><textarea ref={composer} aria-label="自然语言任务" aria-keyshortcuts="Enter Shift+Enter" placeholder="比如：明天下午 3 点开会，提前 10 分钟提醒" value={input} maxLength={4000} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); if (!event.repeat) void addWithAI(); } }} rows={2}/><div className="composer-bottom"><span>{busy ? '正在理解你的安排…' : 'Enter 发送 · Shift+Enter 换行'}</span><button className="add-button" onClick={() => void addWithAI()} disabled={busy || !input.trim() || loadFailed}>{busy ? <span className="spinner"/> : <Icon name="plus" size={15}/>} {busy ? '整理中' : '添加任务'}</button></div></div><div className="status-line" role="status">{addedTask && <div className="added-feedback"><div><strong>已添加 · {addedTask.title}</strong><span>{taskFeedback(addedTask)}</span></div><button className="text-button" disabled={undoBusy} onClick={() => openDraft(addedTask)}>修改</button><button className="text-button" disabled={undoBusy} onClick={() => void undoAdded()}>撤销</button></div>}{status || (!addedTask && <><span className="local-dot"/>仅保存在本机 <span className="shortcut">拖动右下角调整大小</span></>)}</div></footer>
       <div className="panel-footer"><span><span className={`connection-dot ${settings?.hasApiKey ? 'connected' : ''}`}/>{settings?.hasApiKey ? 'DeepSeek 已连接' : '手动记录模式'}</span><button onClick={async () => { try { const paused = await value(api.setPaused(!settings?.paused)); setSettings(current => current ? { ...current, paused } : current); } catch (error) { setStatus(errorText(error)); } }}><Icon name="pin" size={11}/>{settings?.paused ? '已固定展开' : '贴边自动隐藏'}</button></div>
@@ -324,14 +349,14 @@ export default function App() {
         <div className="campus-settings-card"><div><strong>我的校园资料</strong><p>{settings?.campusProfile ? [settings.campusProfile.stage, settings.campusProfile.major || '专业未填'].join(' · ') : '补充资料，让通知判断更有针对性'}</p><span className="field-hint">{settings?.campusProfile?.shareWithAI ? 'AI 个性化判断已开启' : '校园资料仅本地保存'}</span></div><button type="button" className="secondary" disabled={settingsBusy} onClick={() => setProfileOpen(true)}>修改资料</button></div>
         <label>DeepSeek API Key<input autoFocus type="password" autoComplete="off" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings?.hasApiKey ? '已加密保存，留空保持不变' : '在这里粘贴你的 API Key'}/></label>
         <div className="model-row"><label>模型<input value={model} onChange={event => setModel(event.target.value)} required maxLength={100}/></label><button type="button" className="secondary" disabled={settingsBusy || (!apiKey && !settings?.hasApiKey)} onClick={() => void testKey()}>{settingsBusy ? '请稍候…' : '测试连接'}</button></div>
-        <label>快速呼出快捷键<input aria-label="快速呼出快捷键" value={shortcut} placeholder="留空关闭，例如 Ctrl+Alt+Q" maxLength={60} onChange={event => setShortcut(event.target.value)} onKeyDown={event => {
+        <label>快速呼出快捷键<input aria-label="快速呼出快捷键" value={shortcut} placeholder="留空关闭，默认 Ctrl + 左上角 ~ 键" maxLength={60} onChange={event => setShortcut(event.target.value)} onKeyDown={event => {
           if (event.nativeEvent.isComposing || ['Tab', 'Escape', 'Backspace', 'Delete'].includes(event.key)) return;
           if ((event.ctrlKey || event.altKey) && !['Control', 'Alt', 'Shift'].includes(event.key)) {
             event.preventDefault();
-            const key = /^Key[A-Z]$/.test(event.code) ? event.code.slice(3) : /^Digit[0-9]$/.test(event.code) ? event.code.slice(5) : event.key.toUpperCase();
+            const key = event.code === 'Backquote' ? '`' : /^Key[A-Z]$/.test(event.code) ? event.code.slice(3) : /^Digit[0-9]$/.test(event.code) ? event.code.slice(5) : event.key.toUpperCase();
             setShortcut([event.ctrlKey && 'Ctrl', event.altKey && 'Alt', event.shiftKey && 'Shift', key].filter(Boolean).join('+'));
           }
-        }}/></label><p className="field-hint">点击后按组合键，或直接输入；留空关闭。展开后可直接输入，Esc 收起窗口。</p>
+        }}/></label><p className="field-hint">默认 Ctrl + 左上角 ~ 键（Esc 下方、数字 1 左边），不用按 Shift。点击后按组合键，或直接输入；留空关闭。Esc 收起窗口。</p>
         {settings?.quickShortcutError && <p className="form-message error">当前快捷键未生效：{settings.quickShortcutError}</p>}
         <label className="checkbox-label"><input type="checkbox" checked={startAtLogin} onChange={event => setStartAtLogin(event.target.checked)}/> 开机时自动启动到系统托盘</label>
         <label className="checkbox-label"><input type="checkbox" checked={reminderSoundEnabled} onChange={event => setReminderSoundEnabled(event.target.checked)}/> 开启提醒提示音</label>
@@ -347,5 +372,6 @@ export default function App() {
     {draft && <Modal title={draft.id ? '编辑任务' : '添加任务'} subtitle="所有时间均为北京时间（UTC+8）。" onClose={() => { if (!draftBusy) setDraft(null); }}><form onSubmit={event => void saveDraft(event)} className="draft-form"><label>任务名称<input autoFocus required maxLength={500} value={draft.title} onChange={event => setDraft({ ...draft, title: event.target.value })}/></label><div className="field-row"><label>截止时间<input type="datetime-local" value={draft.dueAt} onChange={event => setDraft({ ...draft, dueAt: event.target.value })}/></label><label>分类<select value={draft.category} onChange={event => setDraft({ ...draft, category: event.target.value as Task['category'] })}>{CATEGORIES.map(item => <option key={item}>{item}</option>)}</select></label></div><label>提醒<select value={draft.reminderMode} disabled={!draft.dueAt} onChange={event => setDraft({ ...draft, reminderMode: event.target.value as ReminderMode })}><option value="default">到点提醒（默认）</option><option value="custom">指定提醒时间</option><option value="none">不提醒</option></select></label>{draft.dueAt && draft.reminderMode === 'custom' && <label>提醒时间<input type="datetime-local" required value={draft.reminderAt} onChange={event => setDraft({ ...draft, reminderAt: event.target.value })}/></label>}<label>备注<textarea rows={2} maxLength={4000} value={draft.notes} onChange={event => setDraft({ ...draft, notes: event.target.value })}/></label>{draft.sourceText && <details className="source-text"><summary>查看原始输入</summary><p>{draft.sourceText}</p></details>}{!draft.dueAt && <p className="field-hint">没有截止时间时不提醒。</p>}<p className="form-message error" role="alert">{draftError}</p><div className="modal-actions"><button type="button" className="secondary" disabled={draftBusy} onClick={() => setDraft(null)}>取消</button><button type="submit" className="primary" disabled={draftBusy}>{draftBusy ? '保存中…' : '保存任务'}</button></div></form></Modal>}
     {reminderPrompt && <Modal key={reminderPrompt.id} title="该行动啦" subtitle={reminders.tasks.length > 1 ? `还有 ${reminders.tasks.length - 1} 条排队，逐条回复即可。` : '用自己的话回复即可。'} onClose={dismissReminder}><div className="reminder-prompt"><strong>{reminderPrompt.title}</strong><p>可以回复“好的”“收到，我马上处理”或“hao”；如果还没做，直接说“半小时后再提醒我”或“明天上午9点提醒我”。</p></div><form onSubmit={event => void submitReminderResponse(event)}><label>你的回复<input autoFocus value={reminderReply} onChange={event => dispatchReminder({ type: 'reply', id: reminderPrompt.id, text: event.target.value })} onKeyDown={event => { if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) event.preventDefault(); }} placeholder="例如：好的，或半小时后再提醒我" maxLength={500}/></label><p className="form-message error" role="alert">{reminderError}</p><div className="modal-actions"><button type="button" className="secondary" disabled={reminderBusy} onClick={dismissReminder}>暂不回复（5分钟后提醒）</button><button type="submit" className="primary" disabled={reminderBusy}>{reminderBusy ? '理解中…' : '确认回复'}</button></div></form></Modal>}
     {deleteId && <Modal title="删除这条任务？" subtitle="删除后无法恢复。" onClose={() => setDeleteId(null)}><p className="delete-title">{tasks.find(task => task.id === deleteId)?.title}</p><div className="modal-actions"><button className="secondary" onClick={() => setDeleteId(null)}>取消</button><button className="danger" onClick={() => void deleteTask()}>删除任务</button></div></Modal>}
+    {bulkConfirm && <Modal title={"删除所选已完成任务？"} subtitle={`将删除 ${bulkConfirm.length} 条已完成任务，删除后无法恢复。`} onClose={() => { if (!bulkBusy) setBulkConfirm(null); }}><ul className="bulk-delete-preview">{bulkConfirm.slice(0, 8).map(id => <li key={id}>{tasks.find(task => task.id === id)?.title || '任务已变更'}</li>)}</ul>{bulkConfirm.length > 8 && <p>另有 {bulkConfirm.length - 8} 条。</p>}<p className="form-message error" role="alert">{bulkError}</p><div className="modal-actions"><button className="secondary" disabled={bulkBusy} onClick={() => setBulkConfirm(null)}>取消</button><button className="danger" disabled={bulkBusy} onClick={() => void deleteSelectedCompleted()}>{bulkBusy ? '删除中…' : '确认批量删除'}</button></div></Modal>}
   </div>;
 }

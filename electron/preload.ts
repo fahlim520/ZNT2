@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('taskDesk', {
   getTasks: () => invoke('tasks:list'),
   saveTask: (task: unknown) => invoke('tasks:save', task),
   deleteTask: (id: string) => invoke('tasks:delete', id),
+  deleteCompletedTasks: (ids: string[]) => invoke('tasks:delete-completed', ids),
   undoAddedTask: (id: string) => invoke('tasks:undo-added', id),
   toggleTask: (id: string, completed: boolean) => invoke('tasks:toggle', { id, completed }),
   respondReminder: (id: string, response: string) => invoke('reminder:respond', { id, response }),

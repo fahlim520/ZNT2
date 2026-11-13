@@ -73,6 +73,16 @@ button:disabled { cursor: default; opacity: .5; }
 .task-card:hover { transform: translateY(-1px); box-shadow: 0 7px 18px #294e5b10; }
 .task-card.overdue { border-color: #f1d3cd; background: #fffdfc; }
 .task-card.completed { opacity: .58; }
+.completed-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; font-size: 11px; position: sticky; top: -3px; z-index: 1; background: var(--theme-primary-tint, #f6faf8); }
+.completed-bulk button { font-size: 11px; }
+.bulk-task-check { flex: 0 0 auto; width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--theme-primary, #3b9471); cursor: pointer; }
+.task-card:has(.bulk-task-check) { opacity: 1; }
+.task-card:has(.bulk-task-check:checked) { border-color: var(--theme-primary, #3b9471); }
+.task-actions[hidden] { display: none; }
+.task-review-note { margin-top: 5px; font-size: 10px; color: #9b692d; line-height: 1.5; overflow-wrap: anywhere; }
+.task-review-note summary { cursor: pointer; }
+.task-review-note p { margin: 4px 0; }
+.bulk-delete-preview { max-height: 160px; overflow-y: auto; padding-left: 20px; overflow-wrap: anywhere; }
 .check { display: grid; flex: 0 0 auto; place-items: center; width: 20px; height: 20px; margin-top: 1px; border: 1.5px solid #c9d7d8; border-radius: 6px; color: white; background: white; }
 .check:hover { border-color: var(--green); }
 .completed .check { border-color: var(--green); background: var(--green); }
